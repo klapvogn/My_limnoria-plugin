@@ -1,4 +1,4 @@
-[[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)]([https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=T8E56M6SP9JH2](https://www.paypal.com/donate/?hosted_button_id=QC2EH6ZRDL37L))](https://www.paypal.com/donate/?hosted_button_id=QC2EH6ZRDL37L)
+[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)]([https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=T8E56M6SP9JH2](https://www.paypal.com/donate/?hosted_button_id=QC2EH6ZRDL37L))]
 
 # Limnoria plugins I wrote or forked.
 
