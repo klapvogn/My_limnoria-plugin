@@ -16,8 +16,8 @@ class Serve(callbacks.Plugin):
             "antispam": (1, 3),  # 1 trigger every 3 seconds
             "spamreplies": [
                 "Hey hey there, don't you think it's going a bit too fast there? Only {since} sec, since your last ...",
-                "I am busy ...",
-                "Haven't you just had ?"
+                "I am busy doing something else",
+                "Haven't you just had ?",
             ],
             "dateformat": "%H:%M:%S",  # Corresponds to 'h:i:s' in PHP
         }
@@ -141,8 +141,7 @@ class Serve(callbacks.Plugin):
         
         self.last_command_time[nick] = current_time  # Update the last command time
         return False
-# BAR
-
+# BAR MENU
     @wrap([optional('channel')])
     def bar(self, irc, msg, args, channel):
         """+bar - Show all available drink commands."""
@@ -156,6 +155,7 @@ class Serve(callbacks.Plugin):
             "+wine",     # Wine
             "+ice",      # Ice cream            
             "+mix",      # Mix
+            "+head",     # Head
             "+pipe",     # Pipe
             "+coke",     # Coke
             "+pussy",    # Pussy (from your existing code)
@@ -164,16 +164,17 @@ class Serve(callbacks.Plugin):
         ]
 
         # Format the response
-        response = "Available drinks: " + ", ".join(available_drinks)
+        response = "Available on the menu: " + ", ".join(available_drinks)
         
         # Send the response
         irc.reply(response)    
+# END
 
 # DRINKS
     @wrap([optional('something'), optional('channel')])
     def cola(self, irc, msg, args, nickname, channel):
-        """+cola [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
+        """+cola [nickname] - Serve some beers. Optionally to a specific nickname."""
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -189,32 +190,46 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "cola", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "Serves icecold cola {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "Serves cola that has been laying in a pile of shit ~45c {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "Serves cola that's been standing close to a box of dry ice ~1.3c {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "Serves a warm flat cola that no one wants ~25c {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "Serves cola fresh from the fridge, chilled to perfection ~5c {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "Serves cola that tastes slightly metallic after standing in a can too long ~18c {to_nick}({today_count}/{total_count}/{sumtotal})"
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "serves ice-cold cola to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves cola that has been laying in a pile of shit, ~45°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves cola that's been standing close to a box of dry ice, ~1.3°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves a warm, flat cola that no one wants ~25°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves cola fresh from the fridge, chilled to perfection ~5°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves cola that tastes slightly metallic after standing in a can too long, ~18°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+
+        ]
+
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            f"want cola? I'm serving sarcasm on tap today. ({today_count}/{total_count}/{sumtotal})",
+            f"you're thirsty? Too bad, I'm all out of care today ({today_count}/{total_count}/{sumtotal})",
+            f"oh, you want a cola? How about you try refreshing your life choices first? ({today_count}/{total_count}/{sumtotal})",
+            f"cola? Coming right up! It's 99% virtual and 1% imagination! ({today_count}/{total_count}/{sumtotal})",
+            f"one cola, straight from my nonexistent fridge. Enjoy! {nick} ({today_count}/{total_count}/{sumtotal})",
+            f"if only you could actually drink pixels... ({today_count}/{total_count}/{sumtotal})",
+            f"here's your cola virtually hands you an empty can—oops, guess I drank it! {nick} ({today_count}/{total_count}/{sumtotal})",
+            f"cola? On the house! Well, technically in your head. {nick} ({today_count}/{total_count}/{sumtotal})",
+            f"one virtual cola, served with a side of 'don't spill it on your keyboard! ({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
         else:
-            to_nick = f"to {nick} "  # If nickname is provided, add "to <nick>"
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
         # Reply with the final formatted response
         irc.reply(response)
 
     @wrap([optional('something'), optional('channel')])
     def beer(self, irc, msg, args, nickname, channel):
-        """+beer [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
+        """+beer [nickname] - Serve some beers. Optionally to a specific nickname."""
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -230,24 +245,36 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "beer", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "serves icecold beer {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "serves a beer that has been laying in a pile of shit ~45c {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "serves a warm beer {to_nick}({today_count}/{total_count}/{sumtotal})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "serves ice-cold beer to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves a beer that has been laying in a pile of shit. It's 45°C, to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "serves a warm beer to {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "Here's your beer! Don't drink it all in one sip... wait, never mind, it's {to_nick}, go ahead! ({today_count}/{total_count}/{sumtotal})",
+
+        ]
+
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            f"slides a beer over Remember, it's beer, not life advice! ({today_count}/{total_count}/{sumtotal})",
+            f"one beer coming right up! Just promise not to embarrass yourself... again. ({today_count}/{total_count}/{sumtotal})",
+            f"gives you a beer Now you're only half as annoying! ({today_count}/{total_count}/{sumtotal})",
+            f"a beer for you! Because that's cheaper than therapy. ({today_count}/{total_count}/{sumtotal})",
+            f"here's your beer! Because, apparently, this is what I get paid to do... oh wait, I don't get paid. ({today_count}/{total_count}/{sumtotal})",
+            f"Hands you a beer Careful, it's so light you might float away! ({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
         else:
-            to_nick = f"to {nick} "  # If nickname is provided, add "to <nick>"
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
         # Reply with the final formatted response
-        irc.reply(response)   
+        irc.reply(response)  
 
     @wrap([optional('channel')])
     def coffee(self, irc, msg, args, channel):
@@ -307,8 +334,8 @@ class Serve(callbacks.Plugin):
 
     @wrap([optional('something'), optional('channel')])
     def whiskey(self, irc, msg, args, nickname, channel):
-        """+whiskey [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
+        """+wine [nickname] - Serve some wine. Optionally to a specific nickname."""
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -324,29 +351,37 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "whiskey", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "serves whiskey on the rocks {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "found some weird looking bottle in corner, might hit gold cheers {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "cola and bad whiskey for you {to_nick}({today_count}/{total_count}/{sumtotal})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "serves whiskey chilled on the rocks to {to_nick}({today_count}/{total_count}/{sumtotal})",
+            "found some weird-looking bottle in corner; might hit gold. Cheers {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "You are in need of cola and bad whiskey, {to_nick} ({today_count}/{total_count}/{sumtotal})",
+            "another whiskey? How about water this time, {to_nick}?",
+
+        ]
+
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            f"one whiskey coming right up! Drink responsibly... because typing sober didn't work out so well last time. ({today_count}/{total_count}/{sumtotal})",
+            f"here's your whiskey. Now you can drink to forget... how bad your last joke was ({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
         else:
-            to_nick = f"to {nick} "  # If nickname is provided, add "to <nick>"
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
         # Reply with the final formatted response
         irc.reply(response)  
 
     @wrap([optional('something'), optional('channel')])
     def wine(self, irc, msg, args, nickname, channel):
-        """+wine [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
+        """+wine [nickname] - Serve some wine. Optionally to a specific nickname."""
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -362,32 +397,39 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "wine", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "pours up some fine stuff from the basement {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "here you are, found something out back {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "lucky you we just got one of this left enjoy {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "so you're hit hard, where you want it ?, don't cry {to_nick}({today_count}/{total_count}/{sumtotal})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "pours out a variety of good things from the basement {to_nick}({today_count}/{total_count}/{sumtotal})",
+            "here you are {to_nick}; I found something out back. ({today_count}/{total_count}/{sumtotal})",
+            "lucky you {to_nick}, we just have one of these left. Enjoy! ({today_count}/{total_count}/{sumtotal})",
+            "so you're hit hard. Where you want it?, don't cry, {to_nick}({today_count}/{total_count}/{sumtotal})",
+
+        ]
+
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            f"wine! For when coffee isn't strong enough and tequila's a bit too honest. ({today_count}/{total_count}/{sumtotal})",
+            f"wine incoming! Also known as 'Mommy's Little Helper'. ({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
         else:
-            to_nick = f"to {nick} "  # If nickname is provided, add "to <nick>"
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
         # Reply with the final formatted response
-        irc.reply(response)  
+        irc.reply(response)
 # END
 
 # EATING
     @wrap([optional('something'), optional('channel')])
     def ice(self, irc, msg, args, nickname, channel):
         """+ice [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -403,24 +445,31 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "ice", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "here {to_nick}... one ball for you only ({today_count}/{total_count}/{sumtotal})",
-            "finds a biig icecream for {to_nick} eat and you get for free ($50 to use toilet) ({today_count}/{total_count}/{sumtotal})",
-            "dusts off something that look like icecream from the corner of fridge, here you go {to_nick}({today_count}/{total_count}/{sumtotal})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "here {to_nick}... Only one ball is available for you ({today_count}/{total_count}/{sumtotal})",
+            "finds a big ice cream for {to_nick} to eat and you get it for free ($50 to use the toilet). ({today_count}/{total_count}/{sumtotal})",
+            "oh {to_nick}, you think you're cool? That's cute. Stay frozen, snowflake. ({today_count}/{total_count}/{sumtotal})",
+            "you're about as chill as a toaster {to_nick} on fire. ({today_count}/{total_count}/{sumtotal})",
+        ]
+
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            "dusts off something that looks like ice cream from the corner of the fridge. here you go, {nick} ({today_count}/{total_count}/{sumtotal})",
+            "nice try. You're about as frosty as a wet sock. ({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
         else:
-            to_nick = f"{nick} "  # If nickname is provided, add "to <nick>"
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
         # Reply with the final formatted response
-        irc.reply(response)   
+        irc.reply(response)
 # END        
 
 # MIX/HASH/ETC
@@ -457,11 +506,11 @@ class Serve(callbacks.Plugin):
             random_name = 'your mom'  # Fallback if no other users are present
 
         responses = [
-            f"grinding up some weed for a mix ({total_count})",
+            f"preparing a mixture by grinding up some weed ({total_count})",
             f"grabs some of the good stuff for a mix ({total_count})",
-            f"sneaks into {random_name}'s stash and steals for a mix, here you go ({total_count})",
-            f"goes strain hunting in India for some good shit for your mix ({total_count})",
-            f"goes strain hunting in Morocco for some good shit for your mix ({total_count})",
+            f"sneaks into {random_name}'s stash and steals for a mix. Here you go. ({total_count})",
+            f"go to India and hunt for strains that are good for your mix. ({total_count})",
+            f"try strain hunting in Morocco to find some good stuff for your mix. ({total_count})",
         ]
 
         # Select a random response
@@ -489,9 +538,9 @@ class Serve(callbacks.Plugin):
 
         # Define response templates with a placeholder for nickname (or lack thereof)
         responses = [
-            "goes strain hunting in morocco for some good shit for your pipe {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "saw some shit in corner, fills a pipe {to_nick}({today_count}/{total_count}/{sumtotal})",
-            "skunky just arrieved peace all over {to_nick}({today_count}/{total_count}/{sumtotal})",
+            "go strain hunting in Morocco for some good stuff for your pipe, {to_nick}({today_count}/{total_count}/{sumtotal})",
+            "upon seeing some trash in the corner, I filled a pipe, {to_nick}({today_count}/{total_count}/{sumtotal})",
+            "skunky just arrieved. peace all over, {to_nick}({today_count}/{total_count}/{sumtotal})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
@@ -508,7 +557,7 @@ class Serve(callbacks.Plugin):
 
     @wrap([optional('channel')])
     def coke(self, irc, msg, args, channel):
-        """+coke - you need some pussy"""
+        """+coke - you need some coke"""
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -530,15 +579,12 @@ class Serve(callbacks.Plugin):
 
         # Select a random response
         response = random.choice(responses)
-        irc.reply(response)        
-# END
+        irc.reply(response)
 
-    @wrap([optional('something'), optional('channel')])
-    def pussy(self, irc, msg, args, nickname, channel):
-        """+pussy [nickname] - Serve a cola. Optionally to a specific nickname."""
-        
-        # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
-        nick = nickname or msg.nick  
+    @wrap([optional('channel')])
+    def head(self, irc, msg, args, channel):
+        """+coke - you need some coke"""
+        nick = msg.nick
         address = msg.prefix
         network = irc.network
 
@@ -547,35 +593,58 @@ class Serve(callbacks.Plugin):
             last_served_time = self.last_command_time[nick]
             response = self._select_spam_reply(last_served_time)
             irc.reply(response)
-            return        
+            return            
+
+        # Update stats
+        today_count, total_count, sumtotal = self._update_stats(nick, address, "head", channel, network)
+
+        responses = [
+            f".h.e.a.d. ({total_count})",
+            f"head for you sir. ({total_count})",
+        ]        
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)             
+# END
+
+    @wrap([optional('channel')])
+    def pussy(self, irc, msg, args, channel):
+        """+pussy - you need some pussy"""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming commands
+        if self._is_spamming(nick):
+            last_served_time = self.last_command_time[nick]
+            response = self._select_spam_reply(last_served_time)
+            irc.reply(response)
+            return            
 
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "pussy", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
         responses = [
-            "slaps {to_nick}in face with a smelly pussy ({today_count}/{total_count}/{sumtotal})",
-            "sends some pussy {to_nick}'s way.. ({today_count}/{total_count}/{sumtotal})",
-            f"not enough money to suply you aswell ... ({today_count}/{total_count}/{sumtotal})",
-            "if you have the cash {to_nick}I can pull down my undies for you ^_^ ({today_count}/{total_count}/{sumtotal})",
+            f"slaps {nick} in face with a smelly pussy ({total_count})"
+            f"Sends some pussy {nick}'s way.. ({total_count})",
+            f"not enough money to supply you as well ... ({total_count})",
+            f"if you have the cash, {nick}, I can pull down my undies for you ^_^ ({total_count})",
+            f"follow me, {nick}, I have something I want to show you ^_^ ({total_count})",
+            f"wait here, {nick}, I'll be back with some supreme pussy for you ({total_count})",
+            f"for that amount of money, {nick}, I can only show you my tits ({total_count})",
+            f"ohh big spender, {nick}, here you have me fully undressed ({total_count})",
+            f"play nice, {nick}, and maybe I'll go down on my knees for you ({total_count})",
         ]
 
-        # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
-        else:
-            to_nick = f"{nick} "  # If nickname is provided, add "to <nick>"
-
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
-        # Reply with the final formatted response
+        # Select a random response
+        response = random.choice(responses)
         irc.reply(response)
         
     @wrap([optional('something'), optional('channel')])
     def surprise(self, irc, msg, args, nickname, channel):
-        """+surprise [nickname] - Serve a surprise. Optionally to a specific nickname."""
-        
+        """+surprise [nickname] - Serve a nice surprise. Optionally to a specific nickname."""
+
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
         address = msg.prefix
@@ -591,23 +660,29 @@ class Serve(callbacks.Plugin):
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "surprise", channel, network)
 
-        # Define response templates with a placeholder for nickname (or lack thereof)
-        responses = [
-            "makes a sandwich for {to_nick} enjoy this suprime dish ({today_count}/{total_count}/{sumtotal})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "makes a sandwich for {to_nick}. enjoy this supreme dish ({today_count}/{total_count}/{sumtotal})",
             "pours a cup of fresh cow milk to {to_nick} ({today_count}/{total_count}/{sumtotal})",
             "goes out back and chopping the head off a chicken, so a great grilled chicken can be made for {to_nick}({today_count}/{total_count}/{sumtotal})",
         ]
 
-        # Handle the case of nickname or not, to adjust the {to_nick} part
-        if not nickname:
-            to_nick = ""  # No nickname, just empty string
-        else:
-            to_nick = f"{nick} "  # If nickname is provided, add "to <nick>"
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            "GET OUT OF MY BAR! ({today_count}/{total_count}/{sumtotal})",
+            "I only serve to people over 18+ ({today_count}/{total_count}/{sumtotal})",
+        ]
 
-        # Select a random response and format it with stats and nickname info
-        response = random.choice(responses).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
-        
+        # Handle the case of nickname or not, to adjust the {to_nick} part
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
+        else:
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
+
         # Reply with the final formatted response
-        irc.reply(response)         
+        irc.reply(response)        
 
 Class = Serve
