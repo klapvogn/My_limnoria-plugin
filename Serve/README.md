@@ -1,4 +1,4 @@
-The scema to use for the serve plugin is here
+The shcema to use for the serve plugin is here
 
 ```
 CREATE TABLE IF NOT EXISTS servestats (
