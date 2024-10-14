@@ -20,7 +20,7 @@ you just need to edit
 'w': 'Wrong'
 ```
 
-## Use it like this (Positive):
+## Use it like this:
 
 Positive
 ```
