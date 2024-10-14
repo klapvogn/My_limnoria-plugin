@@ -21,3 +21,12 @@ have (max 3). You can also rate
 <nick>++i
 <nick>: +4, -1 = 3. Informative (1)
 ```
+## Stats
+```
++scores
+<nick>: 3 (Informative: 4 - Funny: 0 - Nerd: 0 - Troll: 0) / (Wrong: -0 - Troll: -1) (positive: 4, negative: 1)
+```
+```
++score <nick>
+<nick> has 4 positive and 1 negative kudos. (Net score: 3)
+```
