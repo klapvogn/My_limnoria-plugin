@@ -6,8 +6,8 @@ Kudos is used to award positive and negative kudo points to users in a channel. 
 awarded by using, for example, bob+++ or bob+=2, however, this is limited by your current level of kudos (positive-negative kudos); 1 additional point for every 50 kudo points you
 have (max 3). You can also rate
 
-The script use sqlite3 database and are being made in your Kudos directory. 
-You just need to edit
+The script use sqlite3 database and are being made in your Kudos directory, 
+you just need to edit
 
 `self.conn = sqlite3.connect('/path/to/Kudos/kudos.db')  # Create or connect to a database file`
 
