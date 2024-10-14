@@ -8,5 +8,7 @@ have (max 3). You can also rate
 
 ## Use it like this:
 
-```<nick>++i
-<nick>: +4, -1 = 3. Informative (1)```
+```
+<nick>++i
+<nick>: +4, -1 = 3. Informative (1)
+```
