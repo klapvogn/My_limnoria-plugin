@@ -24,7 +24,7 @@ you just need to edit
 
 Positive
 ```
-<nick>++i (The letter "i" can be substituted with "f,n,t")
+<nick>++i (The letter "i" can be substituted with "i,f,n,t")
 <nick>: +4, -1 = 3. Informative (1)
 ```
 
