@@ -24,13 +24,13 @@ you just need to edit
 
 Positive
 ```
-<nick>++i (The letter "i" can be substituted with "f,n,t,w")
+<nick>++i (The letter "i" can be substituted with "f,n,t")
 <nick>: +4, -1 = 3. Informative (1)
 ```
 
 Negative
 ```
-<nick>--w (The letter "i" can be substituted with "f,n,t,w")
+<nick>--w (The letter "w" can be substituted with "t,w")
 <nick>: +4, -1 = 3. Wrong (1)
 ```
 
