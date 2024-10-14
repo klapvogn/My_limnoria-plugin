@@ -20,12 +20,20 @@ you just need to edit
 'w': 'Wrong'
 ```
 
-## Use it like this:
+## Use it like this (Positive):
 
+Positive
 ```
 <nick>++i (The letter "i" can be substituted with "f,n,t,w")
 <nick>: +4, -1 = 3. Informative (1)
 ```
+
+Negative
+```
+<nick>--w (The letter "i" can be substituted with "f,n,t,w")
+<nick>: +4, -1 = 3. Wrong (1)
+```
+
 ## Stats
 ```
 +scores
