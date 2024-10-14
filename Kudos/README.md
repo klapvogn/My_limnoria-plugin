@@ -8,6 +8,7 @@ have (max 3). You can also rate
 
 The script use sqlite3 database ans are corrected in your Kudos directory. 
 You just need to edit
+
 `self.conn = sqlite3.connect('/path/to/Kudos/kudos.db')  # Create or connect to a database file`
 
 ## Categories
