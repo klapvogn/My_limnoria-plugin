@@ -23,7 +23,7 @@ You just need to edit
 ## Use it like this:
 
 ```
-<nick>++i
+<nick>++i (i can be substituted with "f,n,t,w")
 <nick>: +4, -1 = 3. Informative (1)
 ```
 ## Stats
