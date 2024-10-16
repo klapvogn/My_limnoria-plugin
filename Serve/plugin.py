@@ -1,7 +1,9 @@
 import sqlite3
 import time
+import threading
 import random
 from supybot.commands import *
+from datetime import datetime, timedelta
 import supybot.callbacks as callbacks
 
 class Serve(callbacks.Plugin):
@@ -24,6 +26,9 @@ class Serve(callbacks.Plugin):
 
         # Dictionary to track the last command time for each user
         self.last_command_time = {}
+
+        # Schedule the midnight reset task
+        self.schedule_midnight_reset()
 
     def add_ordinal_number_suffix(self, num):
         if not (num % 100 in [11, 12, 13]):
@@ -50,71 +55,77 @@ class Serve(callbacks.Plugin):
                 network TEXT NOT NULL
             )''')
 
-    def start_daily_clear(self):
-        """Start a timer to clear daily stats at midnight."""
-        now = time.time()
-        midnight = time.mktime(time.strptime(time.strftime('%Y-%m-%d') + ' 00:00:00', '%Y-%m-%d %H:%M:%S')) + 86400
-        delay = midnight - now
-        if delay < 0:
-            delay += 86400  # Schedule for tomorrow if midnight has passed today
-        threading.Timer(delay, self.timer_serve).start()
+    def schedule_midnight_reset(self):
+        # Get the current time and calculate the seconds until midnight
+        now = datetime.now()
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        seconds_until_midnight = (midnight - now).total_seconds()
 
-    def timer_serve(self):
-        """Clear daily stats and set the timer for the next day."""
-        # Clear daily stats
-        with self.db:
-            self.db.execute("UPDATE servestats SET today = 0")
-        self.ircClass.privMsg("#bot", "Cleared serve_today")
+        # Schedule the task to run at midnight
+        threading.Timer(seconds_until_midnight, self.reset_today_stats).start()
 
-        # Start the timer for the next day
-        self.start_daily_clear()            
+    def reset_today_stats(self):
+        # Execute the SQL command to reset the "today" stats
+        cursor = self.db.cursor()
+        cursor.execute("UPDATE servestats SET today = 0;")
+        self.db.commit()
+        cursor.close()
+
+        # Reschedule the task for the next midnight
+        self.schedule_midnight_reset()
+
+    def post_reset_message(self):
+        # Create a message to post to the channel
+        channel = "#bot"  # Specify the channel
+        message = "Daily stats have been reset to 0!"
+        
+        # Queue the message to the channel
+        self.irc.queueMsg(ircmsgs.privmsg(channel, message))        
 
     def _get_stats(self, nick, drink_type, channel, network):
         today = int(time.strftime('%Y%m%d'))
         cursor = self.db.cursor()
 
-        cursor.execute('''SELECT today, SUM(total), COUNT(*)
+        # Fetch the sum of total and today
+        cursor.execute('''SELECT SUM(total) AS sumtotal, SUM(today) AS sumtoday
                         FROM servestats
-                        WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
-                    (nick, drink_type, channel, network))
+                        WHERE network = ? AND type = ?''',
+                    (network, drink_type))
 
         result = cursor.fetchone()
-        if result:
-            today_count, total_count, sumtotal = result
-            total_count = total_count or 0  # Ensure total_count is not None
+        if result and all(value is not None for value in result):
+            sumtotal, sumtoday = result
         else:
-            today_count, total_count, sumtotal = 0, 0, 0
+            sumtotal, sumtoday = 0, 0  # Set defaults if no data is found
 
-        return today_count, total_count, sumtotal
+        return sumtoday, sumtotal
 
     def _update_stats(self, nick, address, drink_type, channel, network):
         today = int(time.strftime('%Y%m%d'))
         cursor = self.db.cursor()
 
-        today_count, total_count, sumtotal = self._get_stats(nick, drink_type, channel, network)
+        # Call _get_stats to retrieve the current counts
+        today_count, total_count = self._get_stats(nick, drink_type, channel, network)
 
-        if sumtotal == 0:
-            # This means it's the first time this user has requested this drink
-            today_count = 1  # Set today's count to 1
-            total_count = 1  # Set total count to 1
+        # Check if total_count is 0 to determine if it's the first entry
+        if total_count == 0:
+            today_count = 1  # First entry for today
+            total_count = 1  # Total count also starts at 1
             cursor.execute('''INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                         (nick, address, drink_type, time.time(), today_count, total_count, channel, network))
+            sumtotal = today_count  # Assuming sumtotal is equal to today's count initially
         else:
-            if today_count == today:
-                today_count += 1
-            else:
-                today_count = 1
-
-            total_count += 1
-
+            # Increment the counts in the existing entry
             cursor.execute('''UPDATE servestats
-                            SET last = ?, today = ?, total = ?
+                            SET today = today + 1, total = total + 1, last = ?
                             WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
-                        (time.time(), today_count, total_count, nick, drink_type, channel, network))
+                        (time.time(), nick, drink_type, channel, network))
+            sumtotal = total_count + 1  # Calculate sumtotal based on the updated total_count
 
-        self.db.commit()
-        return today_count, total_count, sumtotal + 1
+        self.db.commit()  # Commit the changes
+
+        return today_count, total_count, sumtotal  # Return the counts
 
     def _select_spam_reply(self, last_served_time):
         """Select a spam reply if the user requests drinks too quickly."""
@@ -150,6 +161,7 @@ class Serve(callbacks.Plugin):
             "+cola",     # Cola
             "+beer",     # Beer
             "+coffee",   # Coffee
+            "+tea",      # Tea
             "+cap",      # Cappuccino
             "+whiskey",  # Whiskey
             "+wine",     # Wine
@@ -158,7 +170,7 @@ class Serve(callbacks.Plugin):
             "+head",     # Head
             "+pipe",     # Pipe
             "+coke",     # Coke
-            "+pussy",    # Pussy (from your existing code)
+            "+pussy",    # Pussy
             "+surprise"  # Surprise
             # Add other drink commands here as needed
         ]
@@ -173,7 +185,7 @@ class Serve(callbacks.Plugin):
 # DRINKS
     @wrap([optional('something'), optional('channel')])
     def cola(self, irc, msg, args, nickname, channel):
-        """+cola [nickname] - Serve some beers. Optionally to a specific nickname."""
+        """+cola [nickname] - Serve some cola. Optionally to a specific nickname."""
 
         # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
         nick = nickname or msg.nick  
@@ -198,7 +210,6 @@ class Serve(callbacks.Plugin):
             "serves a warm, flat cola that no one wants ~25°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
             "serves cola fresh from the fridge, chilled to perfection ~5°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
             "serves cola that tastes slightly metallic after standing in a can too long, ~18°C to {to_nick} ({today_count}/{total_count}/{sumtotal})",
-
         ]
 
         # Responses for when no nickname is provided
@@ -297,12 +308,44 @@ class Serve(callbacks.Plugin):
         ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
 
         responses = [
-            f"Making a cup of coffee for {nick}, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee."
+            f"Making a cup of coffee for {nick} 🍵, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee.",
+            f"serves a cup of Flat White for {nick},🍵 {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee.",
         ]
 
         # Select a random response
         response = random.choice(responses)
         irc.reply(response)
+
+    @wrap([optional('channel')])
+    def tea(self, irc, msg, args, channel):
+        """+tea - Make a cup of tea."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming commands
+        if self._is_spamming(nick):
+            last_served_time = self.last_command_time[nick]
+            response = self._select_spam_reply(last_served_time)
+            irc.reply(response)
+            return           
+
+        # Update stats
+        today_count, total_count, sumtotal = self._update_stats(nick, address, "tea", channel, network)
+
+        # Add ordinal suffix to sumtotal
+        ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
+
+        responses = [
+            f"A cup of tea is on the way to {nick}! 🍵 Time to relax and enjoy the moment, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
+            f"One piping hot cup of tea coming right up {nick}! ☕ Don't spill the tea, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.", 
+            f"Ah, splendid choice {nick}! 🫖 Your Earl Grey shall be served with a side of elegance, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
+            f"Your tea is ready {nick}! 🍵 Let it soothe your soul and calm your mind, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)        
 
     @wrap([optional('channel')])
     def cap(self, irc, msg, args, channel):
@@ -325,7 +368,7 @@ class Serve(callbacks.Plugin):
         ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
 
         responses = [
-            f"Making a nice Cappuccino for {nick}, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino."
+            f"Making a nice Cappuccino for {nick} 🍵, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino."
         ]
 
         # Select a random response
@@ -608,10 +651,12 @@ class Serve(callbacks.Plugin):
         irc.reply(response)             
 # END
 
-    @wrap([optional('channel')])
-    def pussy(self, irc, msg, args, channel):
-        """+pussy - you need some pussy"""
-        nick = msg.nick
+    @wrap([optional('something'), optional('channel')])
+    def pussy(self, irc, msg, args, nickname, channel):
+        """+pussy [nickname] - Serve a some pussy. Optionally to a specific nickname."""
+
+        # If a nickname is provided, use it; otherwise, use the caller's nickname (msg.nick)
+        nick = nickname or msg.nick  
         address = msg.prefix
         network = irc.network
 
@@ -620,26 +665,43 @@ class Serve(callbacks.Plugin):
             last_served_time = self.last_command_time[nick]
             response = self._select_spam_reply(last_served_time)
             irc.reply(response)
-            return            
+            return        
 
         # Update stats
         today_count, total_count, sumtotal = self._update_stats(nick, address, "pussy", channel, network)
 
-        responses = [
-            f"slaps {nick} in face with a smelly pussy ({total_count})"
-            f"Sends some pussy {nick}'s way.. ({total_count})",
-            f"not enough money to supply you as well ... ({total_count})",
-            f"if you have the cash, {nick}, I can pull down my undies for you ^_^ ({total_count})",
-            f"follow me, {nick}, I have something I want to show you ^_^ ({total_count})",
-            f"wait here, {nick}, I'll be back with some supreme pussy for you ({total_count})",
-            f"for that amount of money, {nick}, I can only show you my tits ({total_count})",
-            f"ohh big spender, {nick}, here you have me fully undressed ({total_count})",
-            f"play nice, {nick}, and maybe I'll go down on my knees for you ({total_count})",
+        # Responses for when a nickname is provided
+        responses_with_nick = [
+            "slaps {to_nick} in face with a smelly pussy ({total_count})"
+            "Sends some pussy {to_nick}'s way.. ({total_count})",
+            "if you have the cash, {to_nick}, I can pull down my undies for you ^_^ ({total_count})",
+            "follow me, {to_nick}, I have something I want to show you ^_^ ({total_count})",
+            "wait here, {to_nick}, I'll be back with some supreme pussy for you ({total_count})",
+            "for that amount of money, {to_nick}, I can only show you my tits ({total_count})",
+            "ohh big spender, {to_nick}, here you have me fully undressed ({total_count})",
+            "play nice, {to_nick}, and maybe I'll go down on my knees for you ({total_count})",
         ]
 
-        # Select a random response
-        response = random.choice(responses)
-        irc.reply(response)
+        # Responses for when no nickname is provided
+        responses_without_nick = [
+            f"free pussy to all. When you find the key to my chastity belt. ^_^ ({total_count})",
+            f"not enough money to supply you as well... ({total_count})",
+            f"Nice try, but I don't think your IQ can handle that kind of complexity ({total_count})",
+            f"Did your brain take a vacation when you typed that? ({total_count})",
+            f"Did someone say 'purr-fect'? Because I'm all ears! ({total_count})",
+        ]
+
+        # Handle the case of nickname or not, to adjust the {to_nick} part
+        if nickname:
+            to_nick = f"{nick}"  # If nickname is provided, use the nickname
+            # Select a random response from the list that includes {to_nick}
+            response = random.choice(responses_with_nick).format(to_nick=to_nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
+        else:
+            # Select a random response from the list that doesn't include {to_nick}
+            response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count, sumtotal=sumtotal)
+
+        # Reply with the final formatted response
+        irc.reply(response) 
         
     @wrap([optional('something'), optional('channel')])
     def surprise(self, irc, msg, args, nickname, channel):
