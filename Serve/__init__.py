@@ -29,7 +29,7 @@
 ###
 
 """
-OMG: Queries OMG website for information about NZB
+Bartender plugin, serve things on irc
 """
 
 import supybot
@@ -37,11 +37,15 @@ import supybot.world as world
 
 # Use this for the version of this plugin.  You may wish to put a CVS keyword
 # in here if you're keeping the plugin in CVS or some similar system.
-__version__ = "2024.08.07"
+__version__ = "0.1"
 
 # XXX Replace this with an appropriate author or supybot.Author instance.
-__author__ = supybot.Author("klapvogn", "klapvogn", "klapvogn@proton.me")
-__maintainer__ = supybot.authors.unknown
+__author__ = supybot.Author("klapvogn", "grimster", "")
+__maintainer__ = getattr(
+    supybot.authors,
+    "klapvogn",
+    supybot.Author("klapvogn", "klapvogn", "klapvogn@proton.me"),
+)
 
 # This is a dictionary mapping supybot.Author instances to lists of
 # contributions.

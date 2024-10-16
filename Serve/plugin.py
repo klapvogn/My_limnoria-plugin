@@ -308,8 +308,8 @@ class Serve(callbacks.Plugin):
         ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
 
         responses = [
-            f"Making a cup of coffee for {nick} 🍵, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee.",
-            f"serves a cup of Flat White for {nick},🍵 {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee.",
+            f"making a cup of coffee for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee for you.",
+            f"serves a cup of Flat White for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made a Flat White for you",
         ]
 
         # Select a random response
@@ -368,7 +368,7 @@ class Serve(callbacks.Plugin):
         ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
 
         responses = [
-            f"Making a nice Cappuccino for {nick} 🍵, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino."
+            f"Making a nice Cappuccino for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino for you."
         ]
 
         # Select a random response
