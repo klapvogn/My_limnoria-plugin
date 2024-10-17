@@ -2,16 +2,24 @@ import sqlite3
 import time
 import threading
 import random
+import pytz
+import supybot.ircmsgs as ircmsgs
 from supybot.commands import *
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 import supybot.callbacks as callbacks
 
 class Serve(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(Serve, self)
         self.__parent.__init__(irc)
+        self.__parent.die()
         self.db = sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db")
         self.init_db()
+        # Dictionary to track the last command time for each user
+        self.last_command_time = {}
+        # Schedule the midnight reset task
+        self.timer = None  # Store the timer so it can be canceled later
+        self.schedule_daily_midnight_reset()            
 
         # Settings for spam replies and date format
         self.settings = {
@@ -23,12 +31,6 @@ class Serve(callbacks.Plugin):
             ],
             "dateformat": "%H:%M:%S",  # Corresponds to 'h:i:s' in PHP
         }
-
-        # Dictionary to track the last command time for each user
-        self.last_command_time = {}
-
-        # Schedule the midnight reset task
-        self.schedule_midnight_reset()
 
     def add_ordinal_number_suffix(self, num):
         if not (num % 100 in [11, 12, 13]):
@@ -55,42 +57,99 @@ class Serve(callbacks.Plugin):
                 network TEXT NOT NULL
             )''')
 
-    def schedule_midnight_reset(self):
-        # Get the current time and calculate the seconds until midnight
-        now = datetime.now()
-        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        seconds_until_midnight = (midnight - now).total_seconds()
+    def schedule_daily_midnight_reset(self):
+        # Set your local timezone (e.g., Europe/Copenhagen)
+        local_tz = pytz.timezone('Europe/Copenhagen')  # Change this to your local timezone
 
-        # Schedule the task to run at midnight
+        # Get the current time in the correct timezone
+        now = datetime.now(local_tz)
+
+        # Set today's date and specific time to midnight
+        today = now.date()
+        midnight_time = local_tz.localize(datetime.combine(today, dt_time(0, 0)))
+
+        # Check if it's already past midnight
+        if now >= midnight_time:
+            # If so, schedule for the next midnight
+            midnight_time += timedelta(days=1)
+
+        self.log.info(f"Next scheduled reset at: {midnight_time}")
+
+        # Calculate the seconds until the next midnight
+        seconds_until_midnight = (midnight_time - now).total_seconds()
+
+        # Log current time and scheduling details
+        formatted_now = now.strftime("%Y-%m-%d %H:%M:%S")
+        formatted_midnight_time = midnight_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        self.log.info(f"Current time: {formatted_now}, Next midnight: {formatted_midnight_time}, "
+                    f"Seconds until next midnight: {seconds_until_midnight:.2f}")
+
+        # Schedule the task to run at the next midnight
         threading.Timer(seconds_until_midnight, self.reset_today_stats).start()
 
     def reset_today_stats(self):
-        # Execute the SQL command to reset the "today" stats
-        cursor = self.db.cursor()
-        cursor.execute("UPDATE servestats SET today = 0;")
-        self.db.commit()
-        cursor.close()
+        if not hasattr(self, 'irc'):
+            self.log.error("The 'irc' attribute is not initialized.")
+            return        
+        try:
+            # Log the attempt to reset stats
+            self.log.info("Attempting to reset 'today' stats.")
 
-        # Reschedule the task for the next midnight
-        self.schedule_midnight_reset()
+            # Create a new database connection for this thread
+            with sqlite3.connect('/home/ubuntu/limnoria/plugins/Serve/servestats.db') as db_conn:
+                cursor = db_conn.cursor()
+
+                # Log the query being executed
+                self.log.info("Executing SQL query to reset 'today' stats.")
+                cursor.execute('''UPDATE servestats SET today = 0''')
+
+                # Commit the changes
+                db_conn.commit()
+
+            # Log that the reset is complete
+            self.log.info("Stats reset complete.")
+
+            # Call the post_reset_message function to send the message
+            self.post_reset_message()            
+        
+        except Exception as e:
+            # Log any error that occurs during the reset
+            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
 
     def post_reset_message(self):
         # Create a message to post to the channel
         channel = "#bot"  # Specify the channel
         message = "Daily stats have been reset to 0!"
         
-        # Queue the message to the channel
-        self.irc.queueMsg(ircmsgs.privmsg(channel, message))        
+        # Log the message posting event
+        self.log.info(f"Posting reset message to channel {channel}: {message}")
 
-    def _get_stats(self, nick, drink_type, channel, network):
+        # Get the IRC object for the specified network
+        irc = supybot.world.ircs["omg"]  # Replace "networkname" with the actual network name
+
+        # Queue the message to the channel
+        irc.queueMsg(ircmsgs.privmsg(channel, message))
+
+    def die(self):
+        # Stop the timer if it's running
+        if self.timer is not None:
+            self.timer.cancel()
+            self.log.info("Scheduled timer cancelled.")
+
+        # Perform any other necessary cleanup here
+        # E.g., closing database connections or other resources
+        self.log.info("Plugin is shutting down and cleaning up resources.")        
+
+    def _get_stats(self, nick, drink_type, channel, network): 
         today = int(time.strftime('%Y%m%d'))
         cursor = self.db.cursor()
 
         # Fetch the sum of total and today
         cursor.execute('''SELECT SUM(total) AS sumtotal, SUM(today) AS sumtoday
                         FROM servestats
-                        WHERE network = ? AND type = ?''',
-                    (network, drink_type))
+                        WHERE network = ? AND type = ? AND nick = ?''',  # Added nick to filter properly
+                    (network, drink_type, nick))
 
         result = cursor.fetchone()
         if result and all(value is not None for value in result):
@@ -114,18 +173,20 @@ class Serve(callbacks.Plugin):
             cursor.execute('''INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                         (nick, address, drink_type, time.time(), today_count, total_count, channel, network))
-            sumtotal = today_count  # Assuming sumtotal is equal to today's count initially
         else:
             # Increment the counts in the existing entry
             cursor.execute('''UPDATE servestats
                             SET today = today + 1, total = total + 1, last = ?
                             WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
                         (time.time(), nick, drink_type, channel, network))
-            sumtotal = total_count + 1  # Calculate sumtotal based on the updated total_count
+            
+            today_count += 1  # Increment today's count in the code
+            total_count += 1  # Increment total count in the code
 
         self.db.commit()  # Commit the changes
 
-        return today_count, total_count, sumtotal  # Return the counts
+        print(f"Updated stats - Today: {today_count}, Total: {total_count} for {nick}")  # Debug output
+        return today_count, total_count  # Return updated counts
 
     def _select_spam_reply(self, last_served_time):
         """Select a spam reply if the user requests drinks too quickly."""
@@ -302,14 +363,44 @@ class Serve(callbacks.Plugin):
             return           
 
         # Update stats
-        today_count, total_count, sumtotal = self._update_stats(nick, address, "coffee", channel, network)
+        today_count, total_count = self._update_stats(nick, address, "coffee", channel, network)
 
-        # Add ordinal suffix to sumtotal
-        ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
+        # Add ordinal suffix to total_count
+        ordinal_suffix = self.add_ordinal_number_suffix(total_count)
 
         responses = [
             f"making a cup of coffee for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made coffee for you.",
-            f"serves a cup of Flat White for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made a Flat White for you",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)
+
+    @wrap([optional('channel')])
+    def cap(self, irc, msg, args, channel):
+        """+cap - Make a Cappuccino."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming commands
+        if self._is_spamming(nick):
+            last_served_time = self.last_command_time[nick]
+            response = self._select_spam_reply(last_served_time)
+            irc.reply(response)
+            return            
+
+        # Update stats
+        #today_count, total_count, sumtotal = self._update_stats(nick, address, "cap", channel, network)
+        today_count, total_count = self._update_stats(nick, address, "cap", channel, network)
+
+        # Add ordinal suffix to sumtotal
+        #ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
+        ordinal_suffix = self.add_ordinal_number_suffix(total_count)
+
+        responses = [
+            f"Making a nice Cappuccino for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino for you."
         ]
 
         # Select a random response
@@ -341,34 +432,6 @@ class Serve(callbacks.Plugin):
             f"One piping hot cup of tea coming right up {nick}! ☕ Don't spill the tea, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.", 
             f"Ah, splendid choice {nick}! 🫖 Your Earl Grey shall be served with a side of elegance, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
             f"Your tea is ready {nick}! 🍵 Let it soothe your soul and calm your mind, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
-        ]
-
-        # Select a random response
-        response = random.choice(responses)
-        irc.reply(response)        
-
-    @wrap([optional('channel')])
-    def cap(self, irc, msg, args, channel):
-        """+cap - Make a Cappuccino."""
-        nick = msg.nick
-        address = msg.prefix
-        network = irc.network
-
-        # Check if the user is spamming commands
-        if self._is_spamming(nick):
-            last_served_time = self.last_command_time[nick]
-            response = self._select_spam_reply(last_served_time)
-            irc.reply(response)
-            return            
-
-        # Update stats
-        today_count, total_count, sumtotal = self._update_stats(nick, address, "cap", channel, network)
-
-        # Add ordinal suffix to sumtotal
-        ordinal_suffix = self.add_ordinal_number_suffix(sumtotal)
-
-        responses = [
-            f"Making a nice Cappuccino for {nick} 🍵. {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made Cappuccino for you."
         ]
 
         # Select a random response
