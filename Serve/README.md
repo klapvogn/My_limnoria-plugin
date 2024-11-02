@@ -14,7 +14,8 @@ It has the following commands:
 
 
 ## Database
-CREATE TABLE IF NOT EXISTS servestats (
+
+```CREATE TABLE IF NOT EXISTS servestats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nick TEXT NOT NULL,
                 address TEXT NOT NULL,
@@ -23,4 +24,4 @@ CREATE TABLE IF NOT EXISTS servestats (
                 today INTEGER NOT NULL,
                 total INTEGER NOT NULL,
                 channel TEXT NOT NULL,
-                network TEXT NOT NULL
+                network TEXT NOT NULL```
