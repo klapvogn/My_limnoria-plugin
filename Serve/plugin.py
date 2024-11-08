@@ -13,13 +13,15 @@ class Serve(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(Serve, self)
         self.__parent.__init__(irc)
-        self.__parent.die()
+
+        # Establish and initialize the database if needed persistently
         self.db = sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db")
-        self.init_db()
+
         # Dictionary to track the last command time for each user
         self.last_command_time = {}
-        # Schedule the midnight reset task
-        self.timer = None  # Store the timer so it can be canceled later
+
+        # Initialize and schedule daily reset
+        self.timer = None
         self.schedule_daily_midnight_reset()       
 
         # Settings for spam replies and date format
@@ -46,19 +48,23 @@ class Serve(callbacks.Plugin):
         return f"{num}th"
 
     def init_db(self):
-        # Create the table if it doesn't exist
-        with self.db:
-            self.db.execute('''CREATE TABLE IF NOT EXISTS servestats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nick TEXT NOT NULL,
-                address TEXT NOT NULL,
-                type TEXT NOT NULL,
-                last REAL NOT NULL,
-                today INTEGER NOT NULL,
-                total INTEGER NOT NULL,
-                channel TEXT NOT NULL,
-                network TEXT NOT NULL
-            )''')
+        # Initialize the database with a local connection
+        try:
+            with sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db") as db_conn:
+                db_conn.execute('''CREATE TABLE IF NOT EXISTS servestats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nick TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    last REAL NOT NULL,
+                    today INTEGER NOT NULL,
+                    total INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    network TEXT NOT NULL
+                )''')
+                db_conn.commit()
+        except Exception as e:
+            self.log.error(f"Error initializing database: {str(e)}")            
 
     def schedule_daily_midnight_reset(self):
         try:
@@ -72,26 +78,28 @@ class Serve(callbacks.Plugin):
 
             seconds_until_midnight = (midnight_time - now).total_seconds()
             self.log.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}, Next reset at: {midnight_time.strftime('%Y-%m-%d %H:%M:%S')}, "
-                        f"Seconds until reset: {seconds_until_midnight:.2f}")
+                          f"Seconds until reset: {seconds_until_midnight:.2f}")
 
             # Schedule the reset task
             self.timer = threading.Timer(seconds_until_midnight, self.reset_today_stats)
             self.timer.start()
         except Exception as e:
-            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")            
+            self.log.error(f"Error occurred while scheduling daily reset: {str(e)}")            
 
     def reset_today_stats(self):
         try:
             self.log.info("Resetting 'today' stats.")
-            # Open a new connection in the new thread
+            # Open a new connection within the method
             with sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db") as db_conn:
                 db_conn.execute('''UPDATE servestats SET today = 0''')
                 db_conn.commit()
             self.log.info("Stats reset successfully.")
             self.post_reset_message()
-
         except Exception as e:
             self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
+        finally:
+            # Reschedule the reset for the next midnight
+            self.schedule_daily_midnight_reset()
 
     def post_reset_message(self):
         try:
@@ -113,10 +121,10 @@ class Serve(callbacks.Plugin):
 
     def die(self):
         self.__parent.die()
-        if self.timer is not None:
+        if self.timer is not None and self.timer.is_alive():
             self.timer.cancel()
             self.log.info("Scheduled timer cancelled.")
-        self.log.info("Plugin shutdown and resources cleaned up.")       
+        self.log.info("Plugin shutdown and resources cleaned up.")      
 
     def _get_stats(self, nick, drink_type, channel, network):
         try:
@@ -217,6 +225,8 @@ class Serve(callbacks.Plugin):
         # List of available drink commands
         available_drinks = [
             "+cola",     # Cola
+            "+sprite",   # Sprite
+            "+fanta",    # Fanta
             "+beer",     # Beer
             "+coffee",   # Coffee
             "+redbull",  # Redbull
@@ -262,15 +272,21 @@ class Serve(callbacks.Plugin):
         # Responses for when a nickname is provided
         responses_with_nick = [
             "serves ice-cold cola to {to_nick} ({today_count}/{total_count})",
-            "serves cola that has been laying in a pile of shit, ~45°C to {to_nick} ({today_count}/{total_count})",
-            "serves cola that's been standing close to a box of dry ice, ~1.3°C to {to_nick} ({today_count}/{total_count})",
-            "serves a warm, flat cola that no one wants ~25°C to {to_nick} ({today_count}/{total_count})",
-            "serves cola fresh from the fridge, chilled to perfection ~5°C to {to_nick} ({today_count}/{total_count})",
-            "serves cola that tastes slightly metallic after standing in a can too long, ~18°C to {to_nick} ({today_count}/{total_count})",
+            "serves Coca Cola that has been laying in a pile of shit, ~45°C to {to_nick} ({today_count}/{total_count})",
+            "serves Coca Cola that's been standing close to a box of dry ice, ~1.3°C to {to_nick} ({today_count}/{total_count})",
+            "serves a warm, flat Coca Cola that no one wants ~25°C to {to_nick} ({today_count}/{total_count})",
+            "serves Coca Cola fresh from the fridge, chilled to perfection ~5°C to {to_nick} ({today_count}/{total_count})",
+            "serves Coca Cola that tastes slightly metallic after standing in a can too long, ~18°C to {to_nick} ({today_count}/{total_count})",
+            "serves Coca Cola Zero fresh from the fridge, chilled to perfection ~5°C to {to_nick} ({today_count}/{total_count})"
         ]
 
         # Responses for when no nickname is provided
         responses_without_nick = [
+            f"serves a nice cold Coca Cola ({today_count}/{total_count})",
+            f"serves a nice cold Coca Cola Zero ({today_count}/{total_count})",
+            f"serves a nice cold Coca Cherry ({today_count}/{total_count})",
+            f"serves a nice cold Coca Cola Vanilla ({today_count}/{total_count})",
+            f"serves a nice cold Coca Cola Vanilla Zero ({today_count}/{total_count})",
             f"want cola? I'm serving sarcasm on tap today. ({today_count}/{total_count})",
             f"you're thirsty? Too bad, I'm all out of care today ({today_count}/{total_count})",
             f"oh, you want a cola? How about you try refreshing your life choices first? ({today_count}/{total_count})",
@@ -293,6 +309,58 @@ class Serve(callbacks.Plugin):
 
         # Reply with the final formatted response
         irc.reply(response)
+
+    @wrap([optional('channel')])
+    def fanta(self, irc, msg, args, channel):
+        """+redbull - Serve a redbull."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming       
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "fanta", channel, network)
+
+        responses = [
+            f"hands a refreshing Fanta Lemon, chilled to a perfect ~5°C, to {nick} – enjoy! ({today_count}/{total_count})",
+            f"offers an icy-cold Fanta Orange, straight from the fridge at ~5°C, to {nick} – cheers! ({today_count}/{total_count})",
+            f"serves up a vibrant Fanta Mango, cooled just right at ~5°C, to {nick} – take a sip! ({today_count}/{total_count})",
+            f"delivers a crisp Fanta Lemon Zero, frosty and refreshing at ~5°C, to {nick} – bottoms up! ({today_count}/{total_count})",
+            f"slides over a perfectly chilled Fanta Orange Zero, kept at ~5°C, to {nick} – savor it! ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)         
+
+    @wrap([optional('channel')])
+    def sprite(self, irc, msg, args, channel):
+        """+sprite - Serve some Sprite"""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming            
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "sprite", channel, network)
+
+        responses = [
+            f"serves ice-cold Sprite to {nick} ({today_count}/{total_count})",
+            f"serves ice-cold Sprite Zero to {nick} ({today_count}/{total_count})",
+            f"serves a semi cold Sprite to {nick} ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)        
 
     @wrap([optional('something'), optional('channel')])
     def beer(self, irc, msg, args, nickname, channel):
@@ -415,6 +483,10 @@ class Serve(callbacks.Plugin):
             f"One piping hot cup of tea coming right up {nick}! ☕ Don't spill the tea, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.", 
             f"Ah, splendid choice {nick}! 🫖 Your Earl Grey shall be served with a side of elegance, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
             f"Your tea is ready {nick}! 🍵 Let it soothe your soul and calm your mind, {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
+            f"A cup of David's Tea Red Velvet, coming right up {nick}! 🍵 {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I made tea.",
+            f"A cup of forest berries tea, coming right up, {nick} ☕ Enjoy it! {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I've made tea.",
+            f"A cup of Spanish orange tea, coming right up, {nick} ☕ Enjoy it! {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I've made tea.",
+            f"A cup of maple black tea, coming right up, {nick} ☕ Enjoy it! {today_count} made today out of {total_count} ordered, making it the {ordinal_suffix} time I've made tea.",
         ]
 
         # Select a random response
