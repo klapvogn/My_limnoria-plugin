@@ -54,7 +54,7 @@ class Serve(callbacks.Plugin):
     def init_db(self):
         # Initialize the database with a local connection
         try:
-            with sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db") as db_conn:
+            with sqlite3.connect(self.db_path) as db_conn:
                 db_conn.execute('''CREATE TABLE IF NOT EXISTS servestats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nick TEXT NOT NULL,
