@@ -94,7 +94,7 @@ class Serve(callbacks.Plugin):
         try:
             self.log.info("Resetting 'today' stats.")
             # Open a new connection within the method
-            with sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db") as db_conn:
+            with sqlite3.connect(self.db_path) as db_conn:
                 db_conn.execute('''UPDATE servestats SET today = 0''')
                 db_conn.commit()
             self.log.info("Stats reset successfully.")
