@@ -15,9 +15,6 @@ class Serve(callbacks.Plugin):
         self.__parent = super(Serve, self)
         self.__parent.__init__(irc)
 
-        # Establish and initialize the database if needed persistently
-        #self.db = sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db")
-
         # Centralize database location using Supybot's directory configuration
         self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
 
