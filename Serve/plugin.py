@@ -6,6 +6,7 @@ import pytz
 import supybot.world  # Import the supybot world
 import supybot.ircmsgs as ircmsgs  # Import IRC message functions
 from supybot.commands import *
+from supybot import conf
 from datetime import datetime, time as dt_time, timedelta
 import supybot.callbacks as callbacks
 
@@ -15,7 +16,13 @@ class Serve(callbacks.Plugin):
         self.__parent.__init__(irc)
 
         # Establish and initialize the database if needed persistently
-        self.db = sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db")
+        #self.db = sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db")
+
+        # Centralize database location using Supybot's directory configuration
+        self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
+
+        # Establish and initialize the database if needed persistently
+        self.db = sqlite3.connect(self.db_path)        
 
         # Dictionary to track the last command time for each user
         self.last_command_time = {}
@@ -50,7 +57,7 @@ class Serve(callbacks.Plugin):
     def init_db(self):
         # Initialize the database with a local connection
         try:
-            with sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db") as db_conn:
+            with sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db") as db_conn:
                 db_conn.execute('''CREATE TABLE IF NOT EXISTS servestats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nick TEXT NOT NULL,
@@ -90,7 +97,7 @@ class Serve(callbacks.Plugin):
         try:
             self.log.info("Resetting 'today' stats.")
             # Open a new connection within the method
-            with sqlite3.connect("/home/ubuntu/limnoria/plugins/Serve/servestats.db") as db_conn:
+            with sqlite3.connect("/home/klapvogn/limnoria/plugins/Serve/servestats.db") as db_conn:
                 db_conn.execute('''UPDATE servestats SET today = 0''')
                 db_conn.commit()
             self.log.info("Stats reset successfully.")
