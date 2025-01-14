@@ -24,7 +24,7 @@ Step 2:
 
 `curl -X POST -d "grant_type=authorization_code&code=<FILL_IT_OUT>&redirect_uri=http://localhost:8080&client_id=<FILL_IT_OUT>&client_secret=<FILL_IT_OUT>" https://accounts.spotify.com/api/token`
 
-Then youy need to fill out your `spotify_credentials.json` with the content from above `client_id` `client_secret` and `refresh_token` 
+Then you need to fill out your `spotify_credentials.json` with the content from above `client_id` `client_secret` and `refresh_token` 
 
 `refresh_token` is what you get from step 2
 
