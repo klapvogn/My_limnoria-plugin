@@ -27,3 +27,7 @@ Step 2:
 Then youy need to fill out your `spotify_credentials.json` with the content from above `client_id` `client_secret` and `refresh_token` 
 
 `refresh_token` is what you get from step 2
+
+when you have done all the above, you can reload the bot. But I would recommend you to restart your bot.
+
+Now you should be able to do: `+playing` (+) depending on your config
