@@ -14,4 +14,8 @@ client_id and client_secret from : https://developer.spotify.com/
 
 I used this curl command to get my tokens
 
+obtaining the `authorization_code`
+
+`curl -X POST "https://accounts.spotify.com/api/token" -H "Content-Type: application/x-www-form-urlencoded" -d "grant_type=client_credentials&client_id=<FILL_IT_OUT>&client_secret=<FILL_IT_OUT>"`
+
 `curl -X POST -d "grant_type=authorization_code&code=<FILL_IT_OUT>&redirect_uri=http://localhost:8080&client_id=<FILL_IT_OUT>&client_secret=<FILL_IT_OUT>" https://accounts.spotify.com/api/token`
