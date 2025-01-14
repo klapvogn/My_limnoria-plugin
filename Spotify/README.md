@@ -10,4 +10,8 @@ client_id and client_secret from : https://developer.spotify.com/
 1: Login and navigate to : https://developer.spotify.com/dashboard
 
 2: If you don't have any apps, then make one
- 
+
+
+I used this curl command to get my tokens
+
+`curl -X POST -d "grant_type=authorization_code&code=<FILL_IT_OUT>&redirect_uri=http://localhost:8080&client_id=<FILL_IT_OUT>&client_secret=<FILL_IT_OUT>" https://accounts.spotify.com/api/token`
