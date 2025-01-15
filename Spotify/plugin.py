@@ -79,13 +79,15 @@ class Spotify(callbacks.Plugin):
                 total_duration = self.ms_to_minutes_seconds(duration_ms)
 
                 irc.reply(f"Now playing: {artists} - {track_name} | Album: {album} | Progress: {current_position}/{total_duration} | Listen: {url}")
+                
+                break  # Exit the loop after sending the reply
             except spotipy.exceptions.SpotifyException as e:
                 if 'token expired' in str(e):
                     self._refresh_access_token()
                     self.playing(irc, msg, args)  # Retry after refreshing token
                 else:
                     irc.reply(f"An error occurred: {e}")
-                break
+                    break  # Exit the loop on other exceptions
 
 
 Class = Spotify
