@@ -12,12 +12,12 @@ What now?
 
 You now have to add the plugin into your plugin directory
 
-Then reload the plugin
+Then reload the plugin:
+
 `+reload currency`
 
 Then:
+
 `+supybot.plugins.Currency.apiKey <your_api_key_here>`
 
 And you should be good to go!
-
-
