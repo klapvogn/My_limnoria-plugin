@@ -28,6 +28,5 @@ And you should be good to go!
 
 Output
 
-`+currency 20 eur to usd`
-
-`20.0 EUR is approximately 20.98 USD.`
+`+currency 20 eur to usd
+20.0 EUR is approximately 20.98 USD.`
