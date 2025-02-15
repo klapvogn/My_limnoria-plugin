@@ -11,7 +11,7 @@ It has the following commands:
 
 `+bar`
 
-`Available on the menu: +cola, +beer, +coffee, +redbull, +tea, +cap, +whiskey, +wine, +ice, gumbo, +mix, +head, +pipe, +coke, +pussy, +surprise`
+`Available on the menu: +anal, +lsd, +cola, +sprite, +fanta, +pepsi, +dew, +beer, +coffee, +redbull, +tea, +cap, +whiskey, +wine, +ice, +gumbo, +ganja, +mix, +head, +pipe, +coke, +pussy, +surprise, +tequila`
 
 
 ## Database
