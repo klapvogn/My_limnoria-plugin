@@ -4,7 +4,7 @@ What is Serve?
 
 I made a bartender plugin that serves and a funny thing on iRC
 
-It stores all the data in a sqlite3 database
+It stores all the data in a sqlcipher database, where all the data is encrypted
 and it resets all the 'today' stats at midnight (00:00) can be altered 
 
 It has the following commands:
