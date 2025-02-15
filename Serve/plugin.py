@@ -1,5 +1,7 @@
 import sqlite3
 import time
+import sqlcipher3 as sqlcipher
+import os
 import threading
 import random
 import pytz
@@ -19,7 +21,7 @@ class Serve(callbacks.Plugin):
         self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
 
         # Establish and initialize the database if needed persistently
-        self.db = sqlite3.connect(self.db_path)        
+        self.db = sqlcipher.connect(self.db_path)        
 
         # Dictionary to track the last command time for each user
         self.last_command_time = {}
@@ -52,9 +54,15 @@ class Serve(callbacks.Plugin):
         return f"{num}th"
 
     def init_db(self):
+        """Initializes the SQLCipher database for storing release information."""
+        passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
+            return        
         # Initialize the database with a local connection
         try:
-            with sqlite3.connect(self.db_path) as db_conn:
+            with sqlcipher.connect(self.db_path) as db_conn:
+                db_conn.execute(f"PRAGMA key = '{passphrase}';")
                 db_conn.execute('''CREATE TABLE IF NOT EXISTS servestats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nick TEXT NOT NULL,
@@ -91,10 +99,16 @@ class Serve(callbacks.Plugin):
             self.log.error(f"Error occurred while scheduling daily reset: {str(e)}")            
 
     def reset_today_stats(self):
+        """Initializes the SQLCipher database for storing release information."""
+        passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
+            return        
         try:
             self.log.info("Resetting 'today' stats.")
             # Open a new connection within the method
-            with sqlite3.connect(self.db_path) as db_conn:
+            with sqlcipher.connect(self.db_path) as db_conn:
+                db_conn.execute(f"PRAGMA key = '{passphrase}';")
                 db_conn.execute('''UPDATE servestats SET today = 0''')
                 db_conn.commit()
             self.log.info("Stats reset successfully.")
@@ -131,62 +145,81 @@ class Serve(callbacks.Plugin):
         self.log.info("Plugin shutdown and resources cleaned up.")      
 
     def _get_stats(self, nick, drink_type, channel, network):
+        """Retrieves stats from the SQLCipher database."""
+        passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
+            return 0, 0  # Return default values if no passphrase
+
         try:
             today = int(time.strftime('%Y%m%d'))
-            cursor = self.db.cursor()
+            # Connect to the database using SQLCipher
+            with sqlcipher.connect(self.db_path) as db_conn:
+                db_conn.execute(f"PRAGMA key = '{passphrase}';")  # Set the encryption key
+                cursor = db_conn.cursor()  # Make sure you're using the correct connection object
 
-            # Fetch the sum of total and today
-            cursor.execute('''SELECT total, today
-                            FROM servestats
-                            WHERE network = ? AND type = ? AND nick = ? AND channel = ?''',  # Added channel to filter properly
-                        (network, drink_type, nick, channel))
+                # Fetch the sum of total and today
+                cursor.execute('''SELECT total, today
+                                FROM servestats
+                                WHERE network = ? AND type = ? AND nick = ? AND channel = ?''',
+                            (network, drink_type, nick, channel))
 
-            result = cursor.fetchone()
-            if result and all(value is not None for value in result):
-                total, today = result
-            else:
-                total, today = 0, 0  # Set defaults if no data is found
+                result = cursor.fetchone()
+                if result and all(value is not None for value in result):
+                    total, today = result
+                else:
+                    total, today = 0, 0  # Set defaults if no data is found
 
-            return today, total
+                return today, total
+
         except Exception as e:
-            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")     
+            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
+            return 0, 0  # Return default values in case of error    
 
 
     def _update_stats(self, nick, address, drink_type, channel, network):
-        today = int(time.strftime('%Y%m%d'))
-        cursor = self.db.cursor()
+        """Initializes the SQLCipher database for storing release information."""
+        passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
+            return        
+
         try:
-            # Call _get_stats to retrieve the current counts
-            today_count, total_count = self._get_stats(nick, drink_type, channel, network)
+            today = int(time.strftime('%Y%m%d'))
+            # Connect to the database using SQLCipher
+            with sqlcipher.connect(self.db_path) as db_conn:
+                # Set the encryption key (passphrase)
+                db_conn.execute(f"PRAGMA key = '{passphrase}';")            
+                cursor = db_conn.cursor()  # Use cursor from db_conn (SQLCipher connection)
 
-            # Check if total_count is 0 to determine if it's the first entry
-            if total_count == 0:
-                today_count = 1  # First entry for today
-                total_count = 1  # Total count also starts at 1
-                cursor.execute('''INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (nick, address, drink_type, time.time(), today_count, total_count, channel, network))
-            else:
-                # Increment the counts in the existing entry
-                cursor.execute('''UPDATE servestats
-                                SET today = today + 1, total = total + 1, last = ?
-                                WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
-                            (time.time(), nick, drink_type, channel, network))
-            
-                today_count += 1  # Increment today's count in the code
-                total_count += 1  # Increment total count in the code
+                # Call _get_stats to retrieve the current counts
+                today_count, total_count = self._get_stats(nick, drink_type, channel, network)
 
-            self.db.commit()  # Commit the changes
+                # Check if total_count is 0 to determine if it's the first entry
+                if total_count == 0:
+                    today_count = 1  # First entry for today
+                    total_count = 1  # Total count also starts at 1
+                    cursor.execute('''INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                (nick, address, drink_type, time.time(), today_count, total_count, channel, network))
+                else:
+                    # Increment the counts in the existing entry
+                    cursor.execute('''UPDATE servestats
+                                    SET today = today + 1, total = total + 1, last = ?
+                                    WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
+                                (time.time(), nick, drink_type, channel, network))
+                
+                    today_count += 1  # Increment today's count in the code
+                    total_count += 1  # Increment total count in the code
 
-            self.log.info(f"Updated stats - Today: {today_count}, Total: {total_count}, for {nick}")
+                db_conn.commit()  # Commit the changes using db_conn (SQLCipher connection)
 
-        #today_count, total_count  # Calculate the sum of today and total counts
-
-            return today_count, total_count  # Return updated counts
+                self.log.info(f"Updated stats - Today: {today_count}, Total: {total_count}, for {nick}")
+                return today_count, total_count  # Return updated counts
 
         except Exception as e:
             self.log.error(f"Failed to update stats for {nick}: {str(e)}")
-            raise  # Re-raise the error if necessary        
+            raise  # Re-raise the error if necessary     
 
     def _select_spam_reply(self, last_served_time):
         """Select a spam reply if the user requests drinks too quickly."""
@@ -228,9 +261,13 @@ class Serve(callbacks.Plugin):
         """+bar - Show all available drink commands."""
         # List of available drink commands
         available_drinks = [
+            "+anal",     # Anal
+            "+lsd",      # LSD
             "+cola",     # Cola
             "+sprite",   # Sprite
             "+fanta",    # Fanta
+            "+pepsi",    # Pepsi
+            "+dew",      # Dew
             "+beer",     # Beer
             "+coffee",   # Coffee
             "+redbull",  # Redbull
@@ -239,13 +276,15 @@ class Serve(callbacks.Plugin):
             "+whiskey",  # Whiskey
             "+wine",     # Wine
             "+ice",      # Ice cream              
-            "gumbo",     # Gumbo
+            "+gumbo",    # Gumbo
+            "+ganja",    # Ganja
             "+mix",      # Mix
             "+head",     # Head
             "+pipe",     # Pipe
             "+coke",     # Coke
             "+pussy",    # Pussy
-            "+surprise"  # Surprise
+            "+surprise", # Surprise
+            "+tequila"   # tequila   
             # Add other drink commands here as needed
         ]
 
@@ -255,6 +294,99 @@ class Serve(callbacks.Plugin):
         # Send the response
         irc.reply(response)    
 # END
+
+# CUSTOM STUFF
+    @wrap([optional('channel')])
+    def anal(self, irc, msg, args, channel):
+        """+anal - Gives anal."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the nick is "ValFar"
+        if nick != "ValFar":
+            irc.reply("You are not cool enough to use this command", prefixNick=True)
+            return  # Do nothing if the nickname is not "ValFar"
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming        
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "anal", channel, network)
+
+        responses = [
+            f"now, {nick}, bend over, and you'll feel a little poke in about 3 seconds ({today_count}/{total_count})"
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)
+
+# Ganja
+    @wrap([optional('channel')])
+    def ganja(self, irc, msg, args, channel):
+        """+ganja - hands some ganja."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming      
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "ganja", channel, network)
+
+        # Add ordinal suffix to total_count
+        responses = [
+            f"serves ganja-infused tea to {nick} ({today_count}/{total_count})",
+            f"serves a dry ganja leaf wrapped in a newspaper to {nick} ({today_count}/{total_count})",
+            f"serves ganja brownies fresh from the oven to {nick} ({today_count}/{total_count})",
+            f"serves a warm ganja milkshake that's slightly questionable to {nick} ({today_count}/{total_count})",
+            f"serves a perfectly rolled ganja joint, chilled to perfection in the fridge to {nick} ({today_count}/{total_count})",
+            f"serves ganja gummies that have been left out in the sun, slightly sticky, to {nick} ({today_count}/{total_count})",
+            f"serves a ganja-laced cola that no one expected but everyone loves to {nick} ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)        
+# END
+
+# Ganja
+    @wrap([optional('channel')])
+    def lsd(self, irc, msg, args, channel):
+        """+lsd - hands some ganja."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming      
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "lsd", channel, network)
+
+        # Add ordinal suffix to total_count
+        responses = [
+            f"serves a colorful LSD-infused tea to {nick} ({today_count}/{total_count})",
+            f"serves a blotter of LSD artfully wrapped in a vintage newspaper to {nick} ({today_count}/{total_count})",
+            f"serves freshly baked brownies with a subtle hint of LSD to {nick} ({today_count}/{total_count})",
+            f"serves a warm LSD milkshake with a swirl of mystery to {nick} ({today_count}/{total_count})",
+            f"serves a perfectly dosed LSD tab, chilled and ready for an adventure, to {nick} ({today_count}/{total_count})",
+            f"serves sticky LSD gummy bears left out in the sun, perfect for a trip, to {nick} ({today_count}/{total_count})",
+            f"serves a surprising LSD-laced cola that makes every sip a journey to {nick} ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)        
+# END       
 
 # DRINKS
     @wrap([optional('something'), optional('channel')])
@@ -334,6 +466,64 @@ class Serve(callbacks.Plugin):
             f"serves up a vibrant Fanta Mango, cooled just right at ~5°C, to {nick} – take a sip! ({today_count}/{total_count})",
             f"delivers a crisp Fanta Lemon Zero, frosty and refreshing at ~5°C, to {nick} – bottoms up! ({today_count}/{total_count})",
             f"slides over a perfectly chilled Fanta Orange Zero, kept at ~5°C, to {nick} – savor it! ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)         
+
+    @wrap([optional('channel')])
+    def pepsi(self, irc, msg, args, channel):
+        """+redbull - Serve a redbull."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming       
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "pepsi", channel, network)
+
+        responses = [
+            f"hands over a crisp and cool Pepsi Peach, straight from ~5°C, to {nick} – enjoy the burst of flavor! ({today_count}/{total_count})"
+            f"slides a frosty Pepsi Peach, perfectly chilled at ~5°C, to {nick} – drink up and relax! ({today_count}/{total_count})",
+            f"serves a refreshing Pepsi Peach, frosty at ~5°C, to {nick} – savor the moment! ({today_count}/{total_count})",
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)
+
+    @wrap([optional('channel')])
+    def dew(self, irc, msg, args, channel):
+        """+dew - Serve a dew."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming       
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "dew", channel, network)
+
+        responses = [
+            f"hands over a crisp and cool Mountain Dew, straight from ~5°C, to {nick} – enjoy the burst of flavor! ({today_count}/{total_count})"
+            f"slides a frosty Diet Mountain Dew, perfectly chilled at ~5°C, to {nick} – drink up and relax! ({today_count}/{total_count})",
+            f"serves a refreshing Mountain Dew Code Red, frosty at ~5°C, to {nick} – savor the moment! ({today_count}/{total_count})",
+            f"hands over a crisp and cool Mountain Dew LiveWire, chilled to a perfect ~5°C, to {nick} – enjoy the zesty burst of citrus! ({today_count}/{total_count})"
+            f"slides a frosty Mountain Dew Baja Blast, fresh from ~5°C, to {nick} – let the tropical vibes take over! ({today_count}/{total_count})"
+            f"serves a vibrant Mountain Dew Voltage, icy at ~5°C, to {nick} – feel the electrifying charge of raspberry citrus! ({today_count}/{total_count})"
+            f"delivers a classic Mountain Dew Real Sugar, perfectly chilled at ~5°C, to {nick} – indulge in the timeless original! ({today_count}/{total_count})"
+            f"offers a rare Mountain Dew Goji Citrus Strawberry, frosted at ~5°C, to {nick} – experience the unique blend of exotic flavors! ({today_count}/{total_count})"
+            f"hands a mysterious Mountain Dew Voo-Dew, straight from ~5°C, to {nick} – uncover the spooky surprise of flavor! ({today_count}/{total_count})"
+            f"slides a juicy Mountain Dew Major Melon, cooled to ~5°C, to {nick} – take a sip of that watermelon sweetness! ({today_count}/{total_count})"
+            f"serves a tangy Mountain Dew Spark, ice-cold at ~5°C, to {nick} – enjoy the bold zing of raspberry lemonade! ({today_count}/{total_count})"            
             # Additional response variations can be added here
         ]
 
@@ -889,6 +1079,42 @@ class Serve(callbacks.Plugin):
             response = random.choice(responses_without_nick).format(nick=nick, today_count=today_count, total_count=total_count)
 
         # Reply with the final formatted response
-        irc.reply(response)        
+        irc.reply(response)
+
+    @wrap([optional('channel')])
+    def tequila(self, irc, msg, args, channel):
+        """+tequila - Serve a tequila."""
+        nick = msg.nick
+        address = msg.prefix
+        network = irc.network
+
+        # Check if the user is spamming
+        if self.handle_spam(nick, irc):
+            return  # Stop processing if spamming       
+
+        # Update stats
+        today_count, total_count = self._update_stats(nick, address, "tequila", channel, network)
+
+        responses = [
+            f"hands over a crisp and smooth shot of silver tequila to {nick} – enjoy the bright, zesty kick! ({today_count}/{total_count})"
+            f"slides a frosty glass of tequila sunrise to {nick} – savor the perfect mix of sweet and tangy! ({today_count}/{total_count})"
+            f"serves a refreshing margarita, with a splash of tequila, to {nick} – take a sip and unwind! ({today_count}/{total_count})"
+            f"hands over a bold reposado tequila to {nick} – enjoy the smooth notes of oak and vanilla! ({today_count}/{total_count})"
+            f"slides a tropical tequila punch to {nick} – let the island vibes take over! ({today_count}/{total_count})"
+            f"serves a vibrant paloma, spiked with tequila, to {nick} – feel the citrusy burst of grapefruit and lime! ({today_count}/{total_count})"
+            f"delivers a classic tequila shot with lime and salt to {nick} – indulge in the timeless ritual! ({today_count}/{total_count})"
+            f"offers a rare añejo tequila to {nick} – experience the rich blend of aged flavors! ({today_count}/{total_count})"
+            f"hands a mysterious tequila mezcal cocktail to {nick} – uncover the smoky surprise in every sip! ({today_count}/{total_count})"
+            f"slides a juicy watermelon tequila cooler to {nick} – take a refreshing sip of fruity sweetness! ({today_count}/{total_count})"
+            f"serves a tangy tequila smash to {nick} – enjoy the bold fusion of herbs and citrus! ({today_count}/{total_count})"
+       
+            # Additional response variations can be added here
+        ]
+
+        # Select a random response
+        response = random.choice(responses)
+        irc.reply(response)               
+
+
 
 Class = Serve
