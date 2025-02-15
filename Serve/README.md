@@ -6,6 +6,7 @@ I made a bartender plugin that serves and a funny thing on iRC
 
 It stores all the data in a sqlite3 database
 and it resets all the 'today' stats at midnight (00:00) can be altered 
+
 It has the following commands:
 
 `+bar`
