@@ -17,4 +17,4 @@ I made this plugin as a fun thing. So when you would like to see what your bandw
         # self.ssh_password = 'yourpassword'  # Uncomment if using password
 ```
 
-3: Then you should be able to use : `+Bandwidth`
+3: Then you should be able to use : `+bw`
