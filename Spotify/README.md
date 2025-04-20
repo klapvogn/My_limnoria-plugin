@@ -29,8 +29,8 @@ Then you need to fill out your `spotify_credentials.json` with the content from 
 `refresh_token` is what you get from step 2
 
 Limnoria have this fancy capabilities I would recommend adding : `+defaultcapability add -Spotify` (+) depending on your config.
-As this plugin only works for you, and when other tries to do `+playing` they will get : `Error: You don't have the spotify capability. If you think that you should have this capability, be sure that you are identified before trying again. The 'whoami' command can tell you if you're identified.`
+As this plugin only works for you, and when other tries to do `+np` they will get : `Error: You don't have the spotify capability. If you think that you should have this capability, be sure that you are identified before trying again. The 'whoami' command can tell you if you're identified.`
 
 when you have done all the above, you can reload the bot. But I would recommend you to restart your bot.
 
-Now you should be able to do: `+playing` (+) depending on your config
+Now you should be able to do: `+np` (+) depending on your config

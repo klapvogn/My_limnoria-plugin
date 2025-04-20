@@ -31,7 +31,7 @@ class Spotify(callbacks.Plugin):
         self.auth_manager = SpotifyOAuth(
             client_id=self.client_id,
             client_secret=self.client_secret,
-            redirect_uri='http://localhost:8080',
+            redirect_uri='http://127.0.0.1:8080',
             scope='user-read-currently-playing',
             cache_path=self.cache_path,  # Specify custom cache path
             open_browser=False
@@ -57,37 +57,37 @@ class Spotify(callbacks.Plugin):
         seconds = total_seconds % 60
         return f"{int(minutes)}:{int(seconds):02}"
 
-    def playing(self, irc, msg, args):
+    def np(self, irc, msg, args):
         """Displays the current track being played on Spotify."""
-        while True:
-            try:
-                current_track = self.sp.current_playback()
-                if not current_track or not current_track['is_playing']:
-                    irc.reply("No track is currently playing.")
-                    return
+        try:
+            current_track = self.sp.current_playback()
+            if not current_track or not current_track['is_playing']:
+                irc.reply("No track is currently playing.")
+                return
 
-                # Track information
-                track_name = current_track['item']['name']
-                artists = ', '.join(artist['name'] for artist in current_track['item']['artists'])
-                album = current_track['item']['album']['name']
-                url = current_track['item']['external_urls']['spotify']
+            # Track information
+            track_name = current_track['item']['name']
+            artists = ', '.join(artist['name'] for artist in current_track['item']['artists'])
+            album = current_track['item']['album']['name']
+            url = current_track['item']['external_urls']['spotify']
 
-                # Duration and current position
-                duration_ms = current_track['item']['duration_ms']
-                current_position_ms = current_track['progress_ms']
-                current_position = self.ms_to_minutes_seconds(current_position_ms)
-                total_duration = self.ms_to_minutes_seconds(duration_ms)
+            # Duration and current position
+            duration_ms = current_track['item']['duration_ms']
+            current_position_ms = current_track['progress_ms']
+            current_position = self.ms_to_minutes_seconds(current_position_ms)
+            total_duration = self.ms_to_minutes_seconds(duration_ms)
 
-                irc.reply(f"Now playing: {artists} - {track_name} | Album: {album} | Progress: {current_position}/{total_duration} | Listen: {url}")
-                
-                break  # Exit the loop after sending the reply
-            except spotipy.exceptions.SpotifyException as e:
-                if 'token expired' in str(e):
-                    self._refresh_access_token()
-                    self.playing(irc, msg, args)  # Retry after refreshing token
-                else:
-                    irc.reply(f"An error occurred: {e}")
-                    break  # Exit the loop on other exceptions
+            message = f"Now playing: {artists} - {track_name} | Album: {album} | Progress: {current_position}/{total_duration} | Listen: {url}"
 
+            # Ensure the message is sent as a single line
+            #irc.reply(message, noEscape=True)
+            irc.reply(message)
+
+        except spotipy.exceptions.SpotifyException as e:
+            if 'token expired' in str(e).lower():
+                self._refresh_access_token()
+                self.np(irc, msg, args)  # Retry after refreshing token
+            else:
+                irc.reply(f"An error occurred: {e}")
 
 Class = Spotify
