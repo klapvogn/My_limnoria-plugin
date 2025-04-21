@@ -10,6 +10,7 @@ from datetime import datetime, date, time as datetime_time
 from supybot.commands import wrap, optional
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
+from threading import Thread
 import supybot.callbacks as callbacks
 import supybot.ircmsgs as ircmsgs
 import supybot.commands as commands
@@ -94,7 +95,8 @@ class PreDB(callbacks.Plugin):
         "X264-UHD-CZ": "\00311X264-UHD-CZ\003",
         "X264-UHD-ES": "\00311X264-UHD-ES\003",        
         "X264-UHD-SP": "\00311X264-UHD-SP\003",
-        "X264-UHD-NORDiC": "\00311X265-UHD-NORDiC\003",        
+        "X264-UHD-ES": "\00311X264-UHD-ES\003",   
+        "X264-UHD-NORDiC": "\00311X265-UHD-NORDiC\003",  
 
         "X264": "\00311X264\003",
         "X264-SD": "\00311X264-SD\003",        
@@ -106,7 +108,8 @@ class PreDB(callbacks.Plugin):
         "X264-HD-DE": "\00311X264-HD-DE\003",
         "X264-HD-CZ": "\00311X264-HD-CZ\003",
         "X264-HD-ES": "\00311X264-HD-ES\003",
-        "X264-HD-SP": "\00311X264-HD-SP\003",        
+        "X264-HD-SP": "\00311X264-HD-SP\003",
+        "X264-HD-ES": "\00311X264-HD-ES\003",    
         "X264-HD-NORDiC": "\00311X264-HD-NORDiC\003",
 
         "X264-SD-NL": "\00311X264-SD-NL\003",
@@ -115,6 +118,7 @@ class PreDB(callbacks.Plugin):
         "X264-SD-FR": "\00311X264-SD-FR\003",     
         "X264-SD-DE": "\00311X264-SD-DE\003",
         "X264-SD-CZ": "\00311X264-SD-CZ\003",
+        "X264-SD-ES": "\00311X264-SD-ES\003",
 #X265
         "X265": "\00311X265\003",
         "X265-HD": "\00311X265-HD\003",
@@ -177,14 +181,16 @@ class PreDB(callbacks.Plugin):
     def __init__(self, irc):
         super().__init__(irc)  # Pass 'irc' to the parent class
         self.target_irc_state = None
+        self.session = requests.Session()
+        self.nfo_cache = OrderedDict()
+        self.nfo_cache_maxsize = 1000  # Adjust as needed         
         self.db_path = '/home/klapvogn/limnoria/plugins/PreDB/predb.db'
         self.passphrase = os.getenv("SQLITE_PASSPHRASE")
         
         if not self.passphrase:
             raise ValueError("SQLITE_PASSPHRASE environment variable is not set.")  
         
-        self.nfo_cache = OrderedDict()
-        self.nfo_cache_maxsize = 1000  # Adjust as needed   
+  
 
     def _get_connection(self):
         if not hasattr(self._local, 'conn') or self._local.conn is None:
@@ -214,7 +220,7 @@ class PreDB(callbacks.Plugin):
                 cursor.execute("""
                     SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
                     FROM releases 
-                    WHERE unixtime = (SELECT MAX(unixtime) FROM releases)
+                    ORDER BY unixtime DESC 
                     LIMIT 1;
                 """)
             else:
@@ -228,21 +234,31 @@ class PreDB(callbacks.Plugin):
     # End              
 
     def initialize_db(self):
-        """Creates the necessary database schema if it doesn't exist."""
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS releases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            releasename TEXT UNIQUE NOT NULL,
-            section TEXT,
-            unixtime INTEGER DEFAULT (strftime('%s', 'now')),
-            files INTEGER,
-            size INTEGER,
-            grp TEXT,
-            genre TEXT,
-            nuked INTEGER,
-            reason TEXT,
-            nukenet TEXT
-        )''')
-        self.conn.commit()
+        """Creates the necessary database schema and indexes if they don't exist."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS releases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    releasename TEXT UNIQUE NOT NULL,
+                    section TEXT,
+                    unixtime INTEGER DEFAULT (strftime('%s', 'now')),
+                    files INTEGER,
+                    size INTEGER,
+                    grp TEXT,
+                    genre TEXT,
+                    nuked INTEGER,
+                    reason TEXT,
+                    nukenet TEXT
+                )
+            ''')
+            # Create indexes
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_releasename ON releases(releasename)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_section ON releases(section)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_grp ON releases(grp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_nuked ON releases(nuked)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_unixtime ON releases(unixtime)')
+            conn.commit()
 
 # CHANGE UNIXTIME
     def unixtime(self, irc, msg, args):
@@ -353,6 +369,7 @@ class PreDB(callbacks.Plugin):
         try:
             # Search for the NFO URL on srrdb.com
             search_url = f"https://api.srrdb.com/v1/nfo/{releasename}"
+            response = self.session.get(search_url, timeout=10)  # Use self.session            
             response = requests.get(search_url)
             
             # Check for successful response
@@ -389,6 +406,7 @@ class PreDB(callbacks.Plugin):
         try:
             # Search for the SFV URL on srrdb.com
             search_url = f"https://api.srrdb.com/v1/nfo/{releasename}"  # SRRDB API URL
+            response = self.session.get(search_url, timeout=10)  # Use self.session  
             response = requests.get(search_url)
             
             # Check for successful response
@@ -503,7 +521,7 @@ class PreDB(callbacks.Plugin):
             info_string = f"[ \x033INFO\x03: {size} MB, {files} Files ] " if size and files else ""        
 
             # Log the unpacked values
-            self.log.info(f"Nuke: {nuked}, Reason: {reason}, Nukenet: {nukenet}")
+            #self.log.info(f"Nuke: {nuked}, Reason: {reason}, Nukenet: {nukenet}")
 
             nuked_details = {
                 1: f"[ \x0305Nuked: {reason or 'No reason'}\x03 => \x0305{nukenet or 'Unknown'}\x03 ]",
@@ -518,10 +536,16 @@ class PreDB(callbacks.Plugin):
             nfo_text, sfv_text, srr_text = self.get_all_links(releasename)  
 
             # Send the appropriate response
-            irc.reply(
-                f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_formatted} ] "
-                f"in {section_and_genre} {info_string}{nuked_details}{nfo_text}{sfv_text}{srr_text}"
-            )
+            message_parts = [
+            f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_formatted} ] ",
+            f"in {section_and_genre} ",
+            info_string,
+            nuked_details,
+            nfo_text,
+            sfv_text,
+            srr_text
+        ]
+            irc.reply(''.join(message_parts))
 
         except sqlcipher.DatabaseError as e:
             self.log.error(f"SQLCipher database error during pre-release fetch: {e}")
@@ -873,50 +897,40 @@ class PreDB(callbacks.Plugin):
 # ADDPRE
     def handle_addpre(self, irc, msg, args):
         """Handles the `!addpre` command."""
-
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
             irc.reply("You do not have permission to use this command.")
             return
-
+        
         if len(args) < 2:
             irc.reply("Usage: !addpre <releasename> <section>")
             return
-
-        releasename, section = args[0], args[1]
-       # self.log.info(f"Received command: !addpre {releasename} {section}")
+        
+        # Extract parameters from args
+        releasename = args[0]
+        section = args[1]
 
         # Extract group from releasename
-        if '-' in releasename:
-            group = releasename.split('-')[-1]
-        else:
-            group = None  # Default if no group found
-            self.log.warning(f"No group found in releasename: {releasename}")
+        group = releasename.split('-')[-1] if '-' in releasename else None        
+        # Run database operation in a thread
+        Thread(target=self._addpre_thread, args=(irc, releasename, section, group)).start()
 
+    def _addpre_thread(self, irc, releasename, section, group):
         try:
-            # Connect to the database using SQLCipher and set the encryption key
             with self._get_connection() as conn:
-                
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO releases (releasename, section, grp) VALUES (?, ?, ?)",
                     (releasename, section, group),
                 )
                 conn.commit()
-
                 self.announce_pre(irc, releasename, section)
-
-            # Add delay between command handling
-            time.sleep(1)  # Adjust time as necessary
-
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher error during INSERT: {e}")
-            irc.reply(f"Error adding release: {e}")
-        except sqlite3.IntegrityError:
-            self.log.error(f"Release already exists: {releasename}")
-            irc.reply(f"Release {releasename} already exists in the database.")
-        except sqlite3.Error as e:
-            self.log.error(f"Database error during INSERT: {e}")
-            irc.reply(f"Error adding release: {e}")
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed" in str(e):
+                irc.reply(f"Release '{releasename}' already exists in the database.")
+            else:
+                self.log.error(f"SQLite integrity error in _addpre_thread: {e}")
+        except Exception as e:
+            self.log.error(f"Error in _addpre_thread: {e}")           
 
 # ADDNUKE
     def handle_addnuke(self, irc, msg, args):
@@ -931,24 +945,26 @@ class PreDB(callbacks.Plugin):
             return
 
         releasename = args[0]
-        reason = ' '.join(args[1:-1])  # Combine all words between the release name and network
-        nukenet = args[-1]  # Use the last argument as the network
-        #self.log.info(f"Received command: !nuke {releasename} {reason} {nukenet}")
+        reason = ' '.join(args[1:-1])
+        nukenet = args[-1]
 
+        # Kick off background thread to handle DB work
+        Thread(target=self._nuke_thread, args=(irc, releasename, reason, nukenet)).start()
+
+    def _nuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            # Connect to the encrypted database with SQLCipher
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Check if the release is already nuked
+                # Check if already nuked
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
-                if result and result[0] == "1":  # Check if the release is already nuked
+                if result and result[0] == "1":
                     irc.reply(f"Release {releasename} is already nuked.")
                     return
 
-                # Update the nuke details for the release
+                # Perform the update
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
                     ("1", reason, nukenet, releasename),
@@ -956,32 +972,21 @@ class PreDB(callbacks.Plugin):
                 conn.commit()
                 self.log.debug(f"Rows affected: {cursor.rowcount}")
 
-                # See it add it correct on the source irc channel! 
-                #if cursor.rowcount == 0:
-                #    irc.reply(f"Release {releasename} not found in the database.")
-                #else:
-                #    irc.reply(f"Nuked release: {releasename} with reason: {reason} on network: {nukenet}")
-                #    self.announce_nuke(irc, releasename, reason, nukenet)
                 if cursor.rowcount != 0:
                     self.announce_nuke(irc, releasename, reason, nukenet)
+                else:
+                    irc.reply(f"Release {releasename} not found in the database.")
 
-            # Add a delay to avoid spamming
+            # Optional delay to prevent spammy nukes
             time.sleep(1)
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during ADDNUKE: {e}")
-            irc.reply(f"Error nuking release: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"SQLite error during ADDNUKE: {e}")
-            irc.reply(f"Error nuking release: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in _nuke_thread: {e}")          
 
 # ADDUNNUKE
     def handle_addunnuke(self, irc, msg, args):
         """Handles the `!unnuke` command."""
-
+        
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
             irc.reply("You do not have permission to use this command.")
             return
@@ -990,15 +995,18 @@ class PreDB(callbacks.Plugin):
             irc.reply("Usage: !unnuke <releasename> <reason> <nukenet>")
             return
 
-        releasename, reason, nukenet = args[0], ' '.join(args[1:-1]), args[-1]
-        #self.log.info(f"Received command: !unnuke {releasename} {reason} {nukenet}")
+        releasename = args[0]
+        reason = ' '.join(args[1:-1])
+        nukenet = args[-1]
 
+        # Run the database operation in a thread
+        Thread(target=self._unnuke_thread, args=(irc, releasename, reason, nukenet)).start()
+
+    def _unnuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            # Connect to the database using SQLCipher with the passphrase
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Check if the release exists and its nuke status
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
@@ -1010,38 +1018,26 @@ class PreDB(callbacks.Plugin):
                     irc.reply(f"Release {releasename} not found in the database.")
                     return
 
-                # Proceed to update the unnuke details, including the reason
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
                     ("2", reason, nukenet, releasename),
                 )
                 conn.commit()
-                # See it add it correct on the source irc channel! 
-                #if cursor.rowcount > 0:
-                #    irc.reply(f"UNNuked release: {releasename} with reason: {reason} on network: {nukenet}")
-                #    self.announce_unnuke(irc, releasename, reason, nukenet)
-                #else:
-                #    self.log.warning(f"Failed to unnuke release: {releasename}")
-                #    irc.reply(f"Failed to update release {releasename} in the database.")
+
                 if cursor.rowcount != 0:
-                    self.announce_unnuke(irc, releasename, reason, nukenet)                
+                    self.announce_unnuke(irc, releasename, reason, nukenet)
+                else:
+                    irc.reply(f"Failed to update release {releasename} in the database.")
 
-            time.sleep(1)  # Optional delay
+            time.sleep(1)  # Optional delay, as in your original
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during UNNUKE: {e}")
-            irc.reply(f"Error unnuking release: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"SQLite error during UNNUKE: {e}")
-            irc.reply(f"Error unnuking release: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in _nuke_thread: {e}")
 
 # MODNUKE
     def handle_addmodnuke(self, irc, msg, args):
         """Handles the `!modnuke` command."""
-        
+
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
             irc.reply("You do not have permission to use this command.")
             return
@@ -1050,58 +1046,46 @@ class PreDB(callbacks.Plugin):
             irc.reply("Usage: !modnuke <releasename> <reason> <nukenet>")
             return
 
-        releasename, reason, nukenet = args[0], ' '.join(args[1:-1]), args[-1]
-        #self.log.info(f"Received command: !modnuke {releasename} {reason} {nukenet}")
+        releasename = args[0]
+        reason = ' '.join(args[1:-1])
+        nukenet = args[-1]
 
+        # Run DB operation in a separate thread
+        Thread(target=self._modnuke_thread, args=(irc, releasename, reason, nukenet)).start()
+
+    def _modnuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            # Connect to the encrypted SQLite database using SQLCipher
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Check if the release exists and its nuke status
+                # Check if release exists and its nuke status
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
-                if result:
-                    if result[0] == "unnuke":
-                        irc.reply(f"Release {releasename} is already modnuked.")
-                        return
-                else:
+                if not result:
                     irc.reply(f"Release {releasename} not found in the database.")
                     return
+                if result[0] == "3":
+                    irc.reply(f"Release {releasename} is already modnuked.")
+                    return
 
-                # Proceed to update the unnuke details, including the reason
+                # Update the release
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
                     ("3", reason, nukenet, releasename),
                 )
                 conn.commit()
-                # See it add it correct on the source irc channel! 
-                #if cursor.rowcount > 0:
-                #    irc.reply(f"ModNuked release: {releasename} with reason: {reason} on network: {nukenet}")
-                #    self.announce_modnuke(irc, releasename, reason, nukenet)
-                #else:
-                #    self.log.warning(f"Failed to modnuke release: {releasename}")
-                #    irc.reply(f"Failed to update release {releasename} in the database.")
-                if cursor.rowcount != 0:
-                    self.announce_modnuke(irc, releasename, reason, nukenet)                 
 
-            time.sleep(1)  # Optional delay
+                if cursor.rowcount > 0:
+                    self.announce_modnuke(irc, releasename, reason, nukenet)
+                else:
+                    irc.reply(f"Failed to modnuke release {releasename}.")
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during MODNUKE: {e}")
-            irc.reply(f"Error modnuking release: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"SQLite error during UPDATE: {e}")
-            irc.reply(f"Error modnuking release: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in _nuke_thread: {e}")
 
     def handle_addinfo(self, irc, msg, args):
         """Handles the `!info` command."""
-        
-        # Retrieve the passphrase from the environment variable
 
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
             irc.reply("You do not have permission to use this command.")
@@ -1112,39 +1096,28 @@ class PreDB(callbacks.Plugin):
             return
 
         releasename, files, size = args[0], args[1], args[2]
-        #self.log.info(f"Received command: !info {releasename} {files} {size}")
 
+        # Run the database update in a separate thread
+        Thread(target=self._addinfo_thread, args=(irc, releasename, files, size)).start()
+
+
+    def _addinfo_thread(self, irc, releasename, files, size):
         try:
-            # Connect to the database using SQLCipher with the passphrase
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                
-                #self.log.info(f"Updating: {releasename}, {files}, {size}")
                 cursor.execute(
                     "UPDATE releases SET files = ?, size = ? WHERE releasename = ?",
                     (files, size, releasename),
                 )
                 conn.commit()
-              # See it add it correct on the source irc channel! 
-              #  if cursor.rowcount == 0:
-              #      irc.reply(f"Release {releasename} not found in the database.")
-              #  else:
-              #      irc.reply(f"Updated release: {releasename} with files: {files} and size: {size}")
-                if cursor.rowcount != 0:
-                    # Add logic for updating the release here
-                    pass
-                # Add delay after processing
-                time.sleep(1)  # Adjust this value as needed (in seconds)
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher error during INFO: {e}")
-            irc.reply(f"Error updating release: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"SQLite error during INFO: {e}")
-            irc.reply(f"Error updating release: {e}")
+                if cursor.rowcount == 0:
+                    pass
+                    
+            time.sleep(1)  # Optional: if you want a pause after processing
+
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in _addinfo_thread: {e}")
 
 
     def announce_pre(self, irc, releasename, section):
