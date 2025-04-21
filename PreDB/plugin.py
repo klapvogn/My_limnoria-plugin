@@ -466,9 +466,9 @@ class PreDB(callbacks.Plugin):
         """<release> -- Fetches pre-release data from the database for a given release"""
 
         # Security: Check if the user is authorized to use this command
-        if msg.nick != 'klapvogn':  # Example of permission check, adjust as needed
-            irc.reply("Error: You do not have permission to use this command.")
-            return
+        #if msg.nick != 'klapvogn':  # Example of permission check, adjust as needed
+        #    irc.reply("Error: You do not have permission to use this command.")
+        #    return
 
         # Determine query based on input
         if release == "*":
@@ -477,16 +477,13 @@ class PreDB(callbacks.Plugin):
             query = "SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet FROM releases WHERE releasename = ? LIMIT 1"
 
         try:
-            # Use the context manager to automatically handle connection opening and closing
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Execute the query
                 if release == "*":
                     cursor.execute(query)
                 else:
                     cursor.execute(query, (release,))
-
                 result = cursor.fetchone()
 
             # If no result is found
@@ -714,20 +711,11 @@ class PreDB(callbacks.Plugin):
                 releasename, unixtime, section, reason, nukenet = result
                 # Lookup the section color
                 section_formatted = self.section_colors.get(section, section)  # Default to section name if not found
-                # Calculate the time difference
-                current_time = datetime.utcnow()
-                release_time = datetime.utcfromtimestamp(unixtime)
-                time_diff = current_time - release_time
-
-                # Format the time difference
-                hours, remainder = divmod(int(time_diff.total_seconds()), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                time_ago = f"{hours} hours {minutes} minutes {seconds} seconds ago"
-
-                # Format the output
-                formatted_time = release_time.strftime('%Y-%m-%d %H:%M:%S GMT')
+                # Optimized time calculations
+                time_ago = self.format_time_ago(unixtime)
+                pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
                 irc.reply(
-                    f"[ \x0305NUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {formatted_time} ] "
+                    f"[ \x0305NUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
                     f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
                 )
         except sqlcipher.DatabaseError as e:
@@ -785,20 +773,11 @@ class PreDB(callbacks.Plugin):
             releasename, unixtime, section, reason, nukenet = result
             # Lookup the section color
             section_formatted = self.section_colors.get(section, section)  # Default to section name if not found
-            # Calculate the time difference
-            current_time = datetime.utcnow()
-            release_time = datetime.utcfromtimestamp(unixtime)
-            time_diff = current_time - release_time
-
-            # Format the time difference
-            hours, remainder = divmod(int(time_diff.total_seconds()), 3600)
-            minutes, seconds = divmod(remainder, 60)
-            time_ago = f"{hours} hours {minutes} minutes {seconds} seconds ago"
-
-            # Format the output
-            formatted_time = release_time.strftime('%Y-%m-%d %H:%M:%S GMT')
+            # Optimized time calculations
+            time_ago = self.format_time_ago(unixtime)
+            pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
             irc.reply(
-                f"[ \x0303UNNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {formatted_time} ] "
+                f"[ \x0303UNNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
                 f"in [ {section_formatted} ] [ \x0303{reason or 'Unknown reason'}\x03 => \x0303{nukenet or 'Unknown network'}\x03 ]"
             )
         except sqlcipher.DatabaseError as e:
@@ -867,24 +846,9 @@ class PreDB(callbacks.Plugin):
                 # Build the info string
                 info_string = f"[ INFO: {size} MB, {files} Files ] " if size and files else ""                
                     
-                # Convert unixtime to a readable format
+                # Optimized time calculations
+                time_ago = self.format_time_ago(unixtime)
                 pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
-
-                # Calculate how long ago it was
-                time_diff = int(time.time()) - unixtime
-                days_ago, remainder = divmod(time_diff, 86400)
-                hours_ago, remainder = divmod(remainder, 3600)
-                minutes_ago, seconds_ago = divmod(remainder, 60)
-
-                # Create the time ago string
-                if days_ago > 0:
-                    time_ago = f"{days_ago} days ago"
-                elif hours_ago > 0:
-                    time_ago = f"{hours_ago} hours ago"
-                elif minutes_ago > 0:
-                    time_ago = f"{minutes_ago} minutes ago"
-                else:
-                    time_ago = f"{seconds_ago} seconds ago"
 
                 # Send the formatted message as a private message to the user
                 message = f"[ \x033PRED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] in [ {section_formatted} ] {info_string}"
