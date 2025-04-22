@@ -16,10 +16,13 @@ class Serve(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(Serve, self)
         self.__parent.__init__(irc)
+        self.passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not self.passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable not set!")
 
         # Centralize database location using Supybot's directory configuration
         self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
-
+        self.init_db()  # Ensure tables exist
         # Establish and initialize the database if needed persistently
         self.db = sqlcipher.connect(self.db_path)        
 
@@ -54,29 +57,33 @@ class Serve(callbacks.Plugin):
         return f"{num}th"
 
     def init_db(self):
-        """Initializes the SQLCipher database for storing release information."""
-        passphrase = os.getenv("SQLITE_PASSPHRASE")
-        if not passphrase:
-            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
-            return        
-        # Initialize the database with a local connection
+        """Initializes the SQLCipher database with proper schema and indexes."""
+        if not self.passphrase:
+            self.log.error("SQLITE_PASSPHRASE not set.")
+            return
         try:
             with sqlcipher.connect(self.db_path) as db_conn:
-                db_conn.execute(f"PRAGMA key = '{passphrase}';")
-                db_conn.execute('''CREATE TABLE IF NOT EXISTS servestats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nick TEXT NOT NULL,
-                    address TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    last REAL NOT NULL,
-                    today INTEGER NOT NULL,
-                    total INTEGER NOT NULL,
-                    channel TEXT NOT NULL,
-                    network TEXT NOT NULL
-                )''')
+                db_conn.execute(f"PRAGMA key = '{self.passphrase}';")
+                db_conn.execute('''
+                    CREATE TABLE IF NOT EXISTS servestats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nick TEXT,
+                        address TEXT,
+                        type TEXT,
+                        last REAL,
+                        today INTEGER,
+                        total INTEGER,
+                        channel TEXT,
+                        network TEXT,
+                        UNIQUE(nick, type, channel, network)
+                    )''')
+                db_conn.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_servestats_main 
+                    ON servestats(nick, type, channel, network)
+                ''')
                 db_conn.commit()
         except Exception as e:
-            self.log.error(f"Error initializing database: {str(e)}")            
+            self.log.error(f"Error initializing database: {str(e)}")           
 
     def schedule_daily_midnight_reset(self):
         try:
@@ -178,48 +185,35 @@ class Serve(callbacks.Plugin):
 
 
     def _update_stats(self, nick, address, drink_type, channel, network):
-        """Initializes the SQLCipher database for storing release information."""
-        passphrase = os.getenv("SQLITE_PASSPHRASE")
-        if not passphrase:
-            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
-            return        
-
+        """Updates stats using an efficient UPSERT operation."""
+        if not self.passphrase:
+            return 0, 0
         try:
-            today = int(time.strftime('%Y%m%d'))
-            # Connect to the database using SQLCipher
+            current_time = time.time()
             with sqlcipher.connect(self.db_path) as db_conn:
-                # Set the encryption key (passphrase)
-                db_conn.execute(f"PRAGMA key = '{passphrase}';")            
-                cursor = db_conn.cursor()  # Use cursor from db_conn (SQLCipher connection)
-
-                # Call _get_stats to retrieve the current counts
-                today_count, total_count = self._get_stats(nick, drink_type, channel, network)
-
-                # Check if total_count is 0 to determine if it's the first entry
-                if total_count == 0:
-                    today_count = 1  # First entry for today
-                    total_count = 1  # Total count also starts at 1
-                    cursor.execute('''INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                                (nick, address, drink_type, time.time(), today_count, total_count, channel, network))
-                else:
-                    # Increment the counts in the existing entry
-                    cursor.execute('''UPDATE servestats
-                                    SET today = today + 1, total = total + 1, last = ?
-                                    WHERE nick = ? AND type = ? AND channel = ? AND network = ?''',
-                                (time.time(), nick, drink_type, channel, network))
-                
-                    today_count += 1  # Increment today's count in the code
-                    total_count += 1  # Increment total count in the code
-
-                db_conn.commit()  # Commit the changes using db_conn (SQLCipher connection)
-
-                self.log.info(f"Updated stats - Today: {today_count}, Total: {total_count}, for {nick}")
-                return today_count, total_count  # Return updated counts
-
+                db_conn.execute(f"PRAGMA key = '{self.passphrase}';")
+                cursor = db_conn.cursor()
+                # UPSERT to handle insert or update in one operation
+                cursor.execute('''
+                    INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
+                    VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+                    ON CONFLICT(nick, type, channel, network) DO UPDATE SET
+                        today = today + 1,
+                        total = total + 1,
+                        last = excluded.last,
+                        address = excluded.address
+                ''', (nick, address, drink_type, current_time, channel, network))
+                db_conn.commit()
+                # Retrieve updated counts
+                cursor.execute('''
+                    SELECT today, total FROM servestats
+                    WHERE nick=? AND type=? AND channel=? AND network=?
+                ''', (nick, drink_type, channel, network))
+                today_count, total_count = cursor.fetchone() or (1, 1)
+                return today_count, total_count
         except Exception as e:
-            self.log.error(f"Failed to update stats for {nick}: {str(e)}")
-            raise  # Re-raise the error if necessary     
+            self.log.error(f"Failed to update stats: {str(e)}")
+            return 0, 0     
 
     def _select_spam_reply(self, last_served_time):
         """Select a spam reply if the user requests drinks too quickly."""
@@ -448,7 +442,7 @@ class Serve(callbacks.Plugin):
 
     @wrap([optional('channel')])
     def fanta(self, irc, msg, args, channel):
-        """+redbull - Serve a redbull."""
+        """+fanta - Serve a Fanta."""
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -475,7 +469,7 @@ class Serve(callbacks.Plugin):
 
     @wrap([optional('channel')])
     def pepsi(self, irc, msg, args, channel):
-        """+redbull - Serve a redbull."""
+        """+pepsi - Serve a Pepsi."""
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -1114,7 +1108,5 @@ class Serve(callbacks.Plugin):
         # Select a random response
         response = random.choice(responses)
         irc.reply(response)               
-
-
 
 Class = Serve
