@@ -1027,7 +1027,7 @@ class PreDB(callbacks.Plugin):
                 if cursor.rowcount != 0:
                     self.announce_unnuke(irc, releasename, reason, nukenet)
                 else:
-                    irc.reply(f"Failed to update release {releasename} in the database.")
+                    irc.reply(f"Release {releasename} not found in the database.")
 
             time.sleep(1)  # Optional delay, as in your original
 
@@ -1079,7 +1079,7 @@ class PreDB(callbacks.Plugin):
                 if cursor.rowcount > 0:
                     self.announce_modnuke(irc, releasename, reason, nukenet)
                 else:
-                    irc.reply(f"Failed to modnuke release {releasename}.")
+                    irc.reply(f"Release {releasename} not found in the database.")
 
         except Exception as e:
             self.log.error(f"Error in _nuke_thread: {e}")
@@ -1218,40 +1218,38 @@ class PreDB(callbacks.Plugin):
 
     def _get_db_stats(self):
         """Fetches statistics from the database."""
-
         try:
-            # Connect to the encrypted database with SQLCipher
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-            
-            # Apply performance optimizations
-            conn.execute("PRAGMA cache_size = -200000")  # Use more cache
-            conn.execute("PRAGMA synchronous = NORMAL")  # Faster writes
-            conn.execute("PRAGMA journal_mode = WAL")    # Improves concurrency
+                
+                # Apply performance optimizations
+                conn.execute("PRAGMA cache_size = -200000")  # Use more cache
+                conn.execute("PRAGMA synchronous = NORMAL")  # Faster writes
+                conn.execute("PRAGMA journal_mode = WAL")    # Improves concurrency
 
-            # Calculate the start of today
-            start_of_today = datetime.combine(date.today(), datetime_time.min).timestamp()
+                # Calculate the start of today
+                start_of_today = datetime.combine(date.today(), datetime_time.min).timestamp()
 
-            # Optimized query to fetch total, today's releases, nukes, and unnukes
-            query = """
-                SELECT 
-                    (SELECT COUNT(*) FROM releases) AS total_releases,
-                    (SELECT COUNT(*) FROM releases WHERE unixtime >= ?) AS total_today,
-                    (SELECT COUNT(*) FROM releases WHERE nuked = '1') AS total_nuked,
-                    (SELECT COUNT(*) FROM releases WHERE nuked = '2') AS total_unnuked,
-                    (SELECT COUNT(*) FROM releases WHERE nuked = '3') AS total_modnuked,
-                    (SELECT releasename FROM releases ORDER BY unixtime DESC LIMIT 1) AS last_pre
-            """
-            
-            cursor.execute(query, (int(start_of_today),))
-            result = cursor.fetchone()
-            
-            if result:
-                total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre = result
-                last_pre = last_pre if last_pre else "None"
-
-            conn.close()
-            return total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre
+                # Optimized query to fetch total, today's releases, nukes, and unnukes
+                query = """
+                    SELECT 
+                        (SELECT COUNT(*) FROM releases) AS total_releases,
+                        (SELECT COUNT(*) FROM releases WHERE unixtime >= ?) AS total_today,
+                        (SELECT COUNT(*) FROM releases WHERE nuked = '1') AS total_nuked,
+                        (SELECT COUNT(*) FROM releases WHERE nuked = '2') AS total_unnuked,
+                        (SELECT COUNT(*) FROM releases WHERE nuked = '3') AS total_modnuked,
+                        (SELECT releasename FROM releases ORDER BY unixtime DESC LIMIT 1) AS last_pre
+                """
+                
+                cursor.execute(query, (int(start_of_today),))
+                result = cursor.fetchone()
+                
+                if result:
+                    total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre = result
+                    last_pre = last_pre if last_pre else "None"
+                    return total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre
+                else:
+                    return None
         except sqlcipher.DatabaseError as e:
             self.log.error(f"SQLCipher database error: {e}")
             return None
