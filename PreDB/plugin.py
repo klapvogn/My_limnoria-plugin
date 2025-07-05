@@ -336,28 +336,6 @@ class PreDB(callbacks.Plugin):
             days = diff // 86400
             return f"{days} day{'s' if days != 1 else ''} ago"
 
-    # Pre Search Cache
-    @lru_cache(maxsize=100)  # Caches the last 100 queries to improve performance
-    def fetch_release(self, release):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if release == "*":
-                cursor.execute("""
-                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
-                    FROM releases 
-                    ORDER BY unixtime DESC 
-                    LIMIT 1;
-                """)
-            else:
-                cursor.execute("""
-                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
-                    FROM releases 
-                    WHERE releasename = ?
-                    LIMIT 1;
-                """, (release,))
-            return cursor.fetchone()
-    # End
-
 # CHANGE UNIXTIME
     def unixtime(self, irc, msg, args):
         """Handles the `+unixtime` command to update the unixtime for a release."""
@@ -454,9 +432,9 @@ class PreDB(callbacks.Plugin):
             self.log.error(f"Unexpected error: {e}")
             irc.reply(f"Unexpected error: {e}")
 
-    # ========================
+    # =============
     # COMMAND: PRE
-    # ========================
+    # =============
     def pre(self, irc, msg, args, release):
         """<release> -- Fetches pre-release data with optimized queries"""
         try:
@@ -515,6 +493,9 @@ class PreDB(callbacks.Plugin):
             irc.reply(f"Error retrieving pre data: {str(e)}")
     pre = commands.wrap(pre, ['text'])
 
+    # ===============
+    # COMMAND: DUPE
+    # ===============
     def dupe(self, irc, msg, args, release):
         """<release> -- Fetches pre-release data based on a search term for duplicates"""
 
@@ -592,9 +573,9 @@ class PreDB(callbacks.Plugin):
 
     dupe = commands.wrap(dupe, ['text'])
 
-    # ========================
+    # ================
     # COMMAND: GROUP
-    # ========================
+    # ================
     def group(self, irc, msg, args, groupname):
         """+group <groupname> - Optimized group statistics"""
         try:
@@ -635,17 +616,15 @@ class PreDB(callbacks.Plugin):
             irc.reply(f"Error retrieving group data: {str(e)}")
     group = commands.wrap(group, ['text'])
 
-# LASTNUKE
+# ==================
+# COMMAND: LASTNUKE
+# ==================
     @wrap([optional('text')])
     def lastnuke(self, irc, msg, args, groupname=None):
-        """[<groupname>] - Fetch the most recent nuked release. Optionally filter by group name."""
-        
+        """Fetch the most recent nuked release. Optionally filter by group name."""
         try:
-            # Use the context manager to handle connection automatically
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
-
-                # Base query to fetch the most recent nuked release
                 query = """
                     SELECT 
                         releasename, 
@@ -658,185 +637,210 @@ class PreDB(callbacks.Plugin):
                 """
                 params = []
 
-                # If a group name is provided, add it to the query
                 if groupname:
                     query += " AND grp = ?"
                     params.append(groupname)
 
-                # Order by most recent nuked release
                 query += " ORDER BY unixtime DESC LIMIT 1"
-
-                # Execute the query
                 cursor.execute(query, params)
                 result = cursor.fetchone()
 
-                if not result:
-                    if groupname:
-                        irc.reply(f"\x0305No nuked releases found for group\x03: {groupname}")
-                    else:
-                        irc.reply("\x0305No nuked releases found.")
-                    return
-
-                releasename, unixtime, section, reason, nukenet = result
-                # Lookup the section color
-                section_formatted = self.section_colors.get(section, section)  # Default to section name if not found
-                # Optimized time calculations
-                time_ago = self.format_time_ago(unixtime)
-                pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
-                irc.reply(
-                    f"[ \x0305NUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
-                    f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
-                )
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during lastnuke: {e}")
-            irc.reply(f"Error lastnuke search: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"Error lastnuke search: {e}")
-            irc.reply(f"Error lastnuke search: {e}")
-        except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
-
-# LASTUNNUKE
-    @wrap([optional('text')])
-    def lastunnuke(self, irc, msg, args, groupname=None):
-        """[<groupname>] - Fetch the most recent unnuked release. Optionally filter by group name."""
-
-        try:
-            # Connect to the SQLCipher database
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-
-            # Base query to fetch the most recent unnuked release
-            query = """
-                SELECT 
-                    releasename, 
-                    unixtime,
-                    section,
-                    reason,
-                    nukenet
-                FROM releases
-                WHERE nuked = 2
-            """
-            params = []
-
-            # If a group name is provided, add it to the query
-            if groupname:
-                query += " AND grp = ?"
-                params.append(groupname)
-
-            # Order by most recent nuked release
-            query += " ORDER BY unixtime DESC LIMIT 1"
-
-            # Execute the query
-            cursor.execute(query, params)
-            result = cursor.fetchone()
-
             if not result:
                 if groupname:
-                    irc.reply(f"\x0305No unnuked releases found for group\x03: {groupname}")
+                    irc.reply(f"\x0305No nuked releases found for group\x03: {groupname}")
                 else:
-                    irc.reply("\x0305No unnuked releases found.")
+                    irc.reply("\x0305No nuked releases found.")
                 return
 
             releasename, unixtime, section, reason, nukenet = result
-            # Lookup the section color
-            section_formatted = self.section_colors.get(section, section)  # Default to section name if not found
-            # Optimized time calculations
+            section_formatted = self.section_colors.get(section, section)
             time_ago = self.format_time_ago(unixtime)
             pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
+            
+            irc.reply(
+                f"[ \x0305NUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
+                f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
+            )
+        except Exception as e:
+            self.log.error(f"Error in lastnuke: {e}")
+            irc.reply(f"Error retrieving last nuke: {str(e)}")
+
+# ====================
+# COMMAND: LASTUNNUKE
+# ====================
+    @wrap([optional('text')])
+    def lastunnuke(self, irc, msg, args, groupname=None):
+        """Fetch the most recent unnuked release. Optionally filter by group name."""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Base query to fetch the most recent unnuked release
+                query = """
+                    SELECT 
+                        releasename, 
+                        unixtime,
+                        section,
+                        reason,
+                        nukenet
+                    FROM releases
+                    WHERE nuked = 2
+                """
+                params = []
+
+                # Add group filter if provided
+                if groupname:
+                    query += " AND grp = ?"
+                    params.append(groupname)
+
+                # Get the most recent result
+                query += " ORDER BY unixtime DESC LIMIT 1"
+                cursor.execute(query, params)
+                result = cursor.fetchone()
+
+            if not result:
+                msg = f"No unnuked releases found{' for group ' + groupname if groupname else ''}"
+                irc.reply(f"\x0305{msg}\x03")
+                return
+
+            # Process result
+            releasename, unixtime, section, reason, nukenet = result
+            section_formatted = self.section_colors.get(section, section)
+            time_ago = self.format_time_ago(unixtime)
+            pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
+            
             irc.reply(
                 f"[ \x0303UNNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
                 f"in [ {section_formatted} ] [ \x0303{reason or 'Unknown reason'}\x03 => \x0303{nukenet or 'Unknown network'}\x03 ]"
             )
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during lastunnuke: {e}")
-            irc.reply(f"Error lastunnuke search: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"Error lastunnuke search: {e}")
-            irc.reply(f"Error lastunnuke search: {e}")
+            
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
-# SECTION
+            self.log.error(f"Error in lastunnuke: {e}")
+            irc.reply(f"Error retrieving unnuke data: {str(e)}")
+
+# =====================
+# COMMAND: LASTMODNUKE
+# =====================
+    @wrap([optional('text')])
+    def lastmodnuke(self, irc, msg, args, groupname=None):
+        """Fetch the most recent modnuked release. Optionally filter by group name."""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Base query to fetch the most recent unnuked release
+                query = """
+                    SELECT 
+                        releasename, 
+                        unixtime,
+                        section,
+                        reason,
+                        nukenet
+                    FROM releases
+                    WHERE nuked = 3
+                """
+                params = []
+
+                # Add group filter if provided
+                if groupname:
+                    query += " AND grp = ?"
+                    params.append(groupname)
+
+                # Get the most recent result
+                query += " ORDER BY unixtime DESC LIMIT 1"
+                cursor.execute(query, params)
+                result = cursor.fetchone()
+
+            if not result:
+                msg = f"No modnuke releases found{' for group ' + groupname if groupname else ''}"
+                irc.reply(f"\x0305{msg}\x03")
+                return
+
+            # Process result
+            releasename, unixtime, section, reason, nukenet = result
+            section_formatted = self.section_colors.get(section, section)
+            time_ago = self.format_time_ago(unixtime)
+            pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
+            
+            irc.reply(
+                f"[ \x0304MODNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] "
+                f"in [ {section_formatted} ] [ \x0304{reason or 'Unknown reason'}\x03 => \x0304{nukenet or 'Unknown network'}\x03 ]"
+            )
+            
+        except Exception as e:
+            self.log.error(f"Error in lastunnuke: {e}")
+            irc.reply(f"Error retrieving unnuke data: {str(e)}")            
+
+# =================
+# COMMAND: SECTION
+# =================          
     def section(self, irc, msg, args, section=None):
         """[<section>] - Fetch the most recent nuked releases, filtered by section. Limit to 10 results."""
-        
         try:
-            # Connect to the SQLCipher-encrypted SQLite3 database
-            # Connect to the SQLCipher database
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
+                
+                # Base query to fetch nuked releases filtered by section
+                query = """
+                    SELECT 
+                        releasename, 
+                        unixtime,
+                        section,
+                        reason,
+                        nukenet,
+                        size,
+                        files
+                    FROM releases
+                    WHERE nuked = 1
+                """
+                params = []
 
-            # Base query to fetch nuked releases filtered by section
-            query = """
-                SELECT 
-                    releasename, 
-                    unixtime,
-                    section,
-                    reason,
-                    nukenet,
-                    size,
-                    files
-                FROM releases
-                WHERE nuked = 1
-            """
-            params = []
+                # If a section is provided, add it to the query
+                if section:
+                    query += " AND section = ?"
+                    params.append(section)
 
-            # If a section is provided, add it to the query
-            if section:
-                query += " AND section = ?"
-                params.append(section)
+                # Order by most recent nuked releases, limit to 10
+                query += " ORDER BY unixtime DESC LIMIT 10"
 
-            # Order by most recent nuked releases, limit to 10
-            query += " ORDER BY unixtime DESC LIMIT 10"
-
-            # Execute the query
-            cursor.execute(query, params)
-            results = cursor.fetchall()
+                # Execute the query
+                cursor.execute(query, params)
+                results = cursor.fetchall()
 
             if not results:
-                irc.reply(f"\x0305Nothing found for\x03: {section}")
+                irc.reply(f"\x0305Nothing found for\x03: {section}" if section else "\x0305No nuked releases found")
                 return
             
             # Notify the user about sending results
             irc.reply(f"PM'ing last 10 results to {msg.nick}")
 
-            # List to accumulate all messages
-            messages = []   
-
-            # Process the results
+            # Process all results efficiently
+            messages = []
             for result in results:
                 releasename, unixtime, section, reason, nukenet, size, files = result
-
-                # Lookup the section color
-                section_formatted = self.section_colors.get(section, section)  # Default to section name if not found
-
-                # Build the info string
-                info_string = f"[ INFO: {size} MB, {files} Files ] " if size and files else ""                
-                    
-                # Optimized time calculations
+                section_formatted = self.section_colors.get(section, section)
                 time_ago = self.format_time_ago(unixtime)
                 pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
-
-                # Send the formatted message as a private message to the user
-                message = f"[ \x033PRED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_formatted} ] in [ {section_formatted} ] {info_string}"
-                # Add the message to the list of messages
+                
+                # Build info string if data exists
+                info_string = f"[ INFO: {size} MB, {files} Files ] " if size and files else ""
+                
+                message = (
+                    f"[ \x033PRED\x03 ] [ {releasename} ] "
+                    f"pred [ {time_ago} / {pretime_formatted} ] "
+                    f"in [ {section_formatted} ] "
+                    f"{info_string}"
+                    f"[ \x0304{reason or 'Unknown reason'}\x03 => \x0304{nukenet or 'Unknown network'}\x03 ]"
+                )
                 messages.append(message)
 
             # Send all messages to the user
-            for msg in messages:
-                irc.reply(msg, private=True)                
+            for message in messages:
+                irc.reply(message, private=True)
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during section: {e}")
-            irc.reply(f"Error section search: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"Error section search: {e}")
-            irc.reply(f"Error section search: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in section: {e}")
+            irc.reply(f"Error retrieving section data: {str(e)}")
     section = commands.wrap(section, ['text'])
 
     # ========================
@@ -874,9 +878,9 @@ class PreDB(callbacks.Plugin):
         except Exception as e:
             self.log.error(f"Addpre error: {e}")          
 
-    # ========================
-    # ADDNUKE (UPDATED)
-    # ========================
+    # ========
+    # ADDNUKE
+    # ========
     def handle_addnuke(self, irc, msg, args):
         """Threadpool-based nuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
@@ -922,9 +926,9 @@ class PreDB(callbacks.Plugin):
             self.log.error(f"Nuke error: {e}")
             irc.reply(f"Error processing nuke: {str(e)}")
 
-    # ========================
-    # ADDUNNUKE (UPDATED)
-    # ========================
+    # ==========
+    # ADDUNNUKE
+    # ==========
     def handle_addunnuke(self, irc, msg, args):
         """Threadpool-based unnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
@@ -974,9 +978,9 @@ class PreDB(callbacks.Plugin):
             self.log.error(f"Unnuke error: {e}")
             irc.reply(f"Error processing unnuke: {str(e)}")
 
-    # ========================
-    # MODNUKE (UPDATED)
-    # ========================
+    # ========
+    # MODNUKE
+    # ========
     def handle_addmodnuke(self, irc, msg, args):
         """Threadpool-based modnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
@@ -1026,9 +1030,9 @@ class PreDB(callbacks.Plugin):
             self.log.error(f"Modnuke error: {e}")
             irc.reply(f"Error processing modnuke: {str(e)}")
 
-    # ========================
-    # ADDINFO (UPDATED)
-    # ========================
+    # ========
+    # ADDINFO
+    # ========
     def handle_addinfo(self, irc, msg, args):
         """Threadpool-based info handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
