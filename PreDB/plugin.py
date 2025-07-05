@@ -4,21 +4,21 @@ import threading
 import sqlcipher3 as sqlcipher
 import os
 import requests
-from datetime import datetime
-from functools import lru_cache
 from datetime import datetime, date, time as datetime_time
+from functools import lru_cache
 from supybot.commands import wrap, optional
 from concurrent.futures import ThreadPoolExecutor
-from collections import OrderedDict
 from threading import Thread
 import supybot.callbacks as callbacks
 import supybot.ircmsgs as ircmsgs
 import supybot.commands as commands
 import supybot.world as world
+import contextlib  # For better connection management
+from collections import OrderedDict
 
 class PreDB(callbacks.Plugin):
-    _local = threading.local()
     """Tracks pre database entries and announces them."""
+
         # # Map the section to its colorized string
     section_colors = {
 # PRE / SCENENOTiCE
@@ -174,68 +174,50 @@ class PreDB(callbacks.Plugin):
         "EBOOK-FOREIGN": "\00309EBOOK-FOREIGN\003",
     }   
     
-    def human_readable_number(self, n):
-        """Convert large numbers into a human-readable format with commas (e.g., 12,345,678)."""
-        return f"{n:,}"    
-
     def __init__(self, irc):
-        super().__init__(irc)  # Pass 'irc' to the parent class
+        super().__init__(irc)
         self.target_irc_state = None
         self.session = requests.Session()
-        self.nfo_cache = OrderedDict()
-        self.nfo_cache_maxsize = 1000  # Adjust as needed         
         self.db_path = '/home/klapvogn/limnoria/plugins/PreDB/predb.db'
         self.passphrase = os.getenv("SQLITE_PASSPHRASE")
         
-        if not self.passphrase:
-            raise ValueError("SQLITE_PASSPHRASE environment variable is not set.")  
+        # Create thread pool for background tasks
+        self.thread_pool = ThreadPoolExecutor(max_workers=10)
         
-  
+        # Initialize caches for HTTP responses
+        self.nfo_cache = OrderedDict()
+        self.sfv_cache = OrderedDict()
+        self.srr_cache = OrderedDict()
+        self.cache_maxsize = 1000
+        
+        if not self.passphrase:
+            raise ValueError("SQLITE_PASSPHRASE environment variable is not set.")
+        
+        # Initialize database
+        self.initialize_db()
 
-    def _get_connection(self):
-        if not hasattr(self._local, 'conn') or self._local.conn is None:
-            self._local.conn = sqlcipher.connect(self.db_path)
-            self._local.conn.execute(f"PRAGMA key = '{self.passphrase}'")
-            self._local.conn.execute("PRAGMA cache_size = -200000")
-            self._local.conn.execute("PRAGMA synchronous = NORMAL")
-            self._local.conn.execute("PRAGMA journal_mode = WAL")
-        return self._local.conn
-    
-    def _get_target_irc_state(self):
-        if self.target_irc_state and self.target_irc_state in world.ircs:
-            return self.target_irc_state
-        target_network = "omg"
-        for irc_state in world.ircs:
-            if target_network in irc_state.network:
-                self.target_irc_state = irc_state
-                return irc_state
-        return None    
+    # ========================
+    # DATABASE CONNECTION POOL
+    # ========================
+    @contextlib.contextmanager
+    def db_connection(self):
+        """Context manager for database connections with automatic cleanup"""
+        conn = sqlcipher.connect(self.db_path)
+        try:
+            conn.execute(f"PRAGMA key = '{self.passphrase}'")
+            conn.execute("PRAGMA cache_size = -200000")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA journal_mode = WAL")
+            yield conn
+        finally:
+            conn.close()
 
-    # Pre Search Cache
-    @lru_cache(maxsize=100)  # Caches the last 100 queries to improve performance
-    def fetch_release(self, release):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if release == "*":
-                cursor.execute("""
-                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
-                    FROM releases 
-                    ORDER BY unixtime DESC 
-                    LIMIT 1;
-                """)
-            else:
-                cursor.execute("""
-                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
-                    FROM releases 
-                    WHERE releasename = ?
-                    LIMIT 1;
-                """, (release,))
-            return cursor.fetchone()
-    # End              
-
+    # =================
+    # DATABASE OPERATIONS
+    # =================
     def initialize_db(self):
-        """Creates the necessary database schema and indexes if they don't exist."""
-        with self._get_connection() as conn:
+        """Creates database schema and indexes"""
+        with self.db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS releases (
@@ -258,7 +240,123 @@ class PreDB(callbacks.Plugin):
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_grp ON releases(grp)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_nuked ON releases(nuked)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_unixtime ON releases(unixtime)')
-            conn.commit()
+            # New index for group stats
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_grp_nuked ON releases(grp, nuked)')
+            conn.commit()            
+    
+    # ========================
+    # CACHED HTTP REQUESTS
+    # ========================
+    @lru_cache(maxsize=1000)
+    def get_cached_url(self, url):
+        """Cached HTTP GET with timeout"""
+        try:
+            response = self.session.get(url, timeout=5)
+            return response
+        except Exception:
+            return None
+
+    def get_nfo_from_srrdb(self, releasename):
+        """Cached NFO lookup with timeout"""
+        url = f"https://api.srrdb.com/v1/nfo/{releasename}"
+        response = self.get_cached_url(url)
+        
+        if response and response.status_code == 200:
+            data = response.json()
+            if data.get('nfolink'):
+                nfo_url = data['nfolink'][0]
+                shortened = self.shorten_url(nfo_url)
+                return f"[ \x033NFO\x03: {shortened} ]"
+        return f"[ \x0305NFO\x03 ]"
+
+    def get_sfv_from_srrdb(self, releasename):
+        """Cached SFV lookup with timeout"""
+        url = f"https://api.srrdb.com/v1/nfo/{releasename}"
+        response = self.get_cached_url(url)
+        
+        if response and response.status_code == 200:
+            data = response.json()
+            if data.get('nfolink'):
+                sfv_url = data['nfolink'][0].replace('.nfo', '.sfv')
+                shortened = self.shorten_url(sfv_url)
+                return f"[ \x033SFV\x03: {shortened} ]"
+        return f"[ \x0305SFV\x03 ]"
+
+    def get_srr_from_srrdb(self, releasename):
+        """Cached SRR lookup with timeout"""
+        url = f"https://www.srrdb.com/download/srr/{releasename}"
+        response = self.get_cached_url(url)
+        
+        if response and response.status_code == 200:
+            shortened = self.shorten_url(url)
+            return f"[ \x033SRR\x03: {shortened} ]"
+        return f"[ \x0305SRR\x03 ]"
+
+    def get_all_links(self, releasename):
+        """Get all links in parallel using cached functions"""
+        with ThreadPoolExecutor() as executor:
+            nfo_future = executor.submit(self.get_nfo_from_srrdb, releasename)
+            sfv_future = executor.submit(self.get_sfv_from_srrdb, releasename)
+            srr_future = executor.submit(self.get_srr_from_srrdb, releasename)
+            return (
+                nfo_future.result(), 
+                sfv_future.result(), 
+                srr_future.result()
+            )
+
+    # ========================
+    # URL SHORTENING
+    # ========================
+    @lru_cache(maxsize=1000)
+    def shorten_url(self, long_url):
+        """Cached URL shortening with timeout"""
+        try:
+            tinyurl_api = f"https://tinyurl.com/api-create.php?url={long_url}"
+            response = self.session.get(tinyurl_api, timeout=3)
+            return response.text if response.status_code == 200 else long_url
+        except Exception:
+            return long_url
+        
+    # ========================
+    # TIME FORMATTING
+    # ========================
+    def format_time_ago(self, timestamp):
+        """Efficient time difference calculation"""
+        now = time.time()
+        diff = int(now - timestamp)
+        if diff < 60:
+            return f"{diff} second{'s' if diff != 1 else ''} ago"
+        elif diff < 3600:
+            minutes = diff // 60
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        elif diff < 86400:
+            hours = diff // 3600
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        else:
+            days = diff // 86400
+            return f"{days} day{'s' if days != 1 else ''} ago"
+
+    # Pre Search Cache
+    @lru_cache(maxsize=100)  # Caches the last 100 queries to improve performance
+    def fetch_release(self, release):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if release == "*":
+                cursor.execute("""
+                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                    FROM releases 
+                    ORDER BY unixtime DESC 
+                    LIMIT 1;
+                """)
+            else:
+                cursor.execute("""
+                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                    FROM releases 
+                    WHERE releasename = ?
+                    LIMIT 1;
+                """, (release,))
+            return cursor.fetchone()
+    # End
 
 # CHANGE UNIXTIME
     def unixtime(self, irc, msg, args):
@@ -356,203 +454,65 @@ class PreDB(callbacks.Plugin):
             self.log.error(f"Unexpected error: {e}")
             irc.reply(f"Unexpected error: {e}")
 
-
-    def get_all_links(self, releasename):
-        with ThreadPoolExecutor() as executor:
-            nfo_future = executor.submit(self.get_nfo_from_srrdb, releasename)
-            sfv_future = executor.submit(self.get_sfv_from_srrdb, releasename)
-            srr_future = executor.submit(self.get_srr_from_srrdb, releasename)
-            return (nfo_future.result(), sfv_future.result(), srr_future.result())
-    
-    def get_nfo_from_srrdb(self, releasename):
-        """Search for NFO file on srrdb.com using the updated API URL and shorten the link with TinyURL"""
-        try:
-            # Search for the NFO URL on srrdb.com
-            search_url = f"https://api.srrdb.com/v1/nfo/{releasename}"
-            response = self.session.get(search_url, timeout=10)  # Use self.session            
-            response = requests.get(search_url)
-            
-            # Check for successful response
-            if response.status_code == 200:
-                data = response.json()
-                
-                # If NFO is available in the "nfolink" key
-                if 'nfolink' in data and data['nfolink']:
-                    nfo_url = data['nfolink'][0]  # Extract the first NFO link (assuming it's in a list)
-                    
-                    # Shorten the NFO URL using TinyURL
-                    shortened_nfo = self.shorten_url_with_tinyurl(nfo_url)
-                    return f"[ \x033NFO\x03: {shortened_nfo} ]"
-                else:
-                    return f"[ \x0305NFO\x03 ]"
-            else:
-                return f"[ \x0305NFO\x03 ]"
-        
-        except Exception as e:
-            return f"[ \x0305NFO\x03: Error retrieving NFO ]"
-
-    def get_nfo_cached(self, releasename):
-        if releasename in self.nfo_cache:
-            self.nfo_cache.move_to_end(releasename)
-            return self.nfo_cache[releasename]
-        result = self.get_nfo_from_srrdb(releasename)
-        self.nfo_cache[releasename] = result
-        if len(self.nfo_cache) > self.nfo_cache_maxsize:
-            self.nfo_cache.popitem(last=False)
-        return result
-        
-    def get_sfv_from_srrdb(self, releasename):
-        """Search for SFV file on srrdb.com using the updated API URL and shorten the link with TinyURL"""
-        try:
-            # Search for the SFV URL on srrdb.com
-            search_url = f"https://api.srrdb.com/v1/nfo/{releasename}"  # SRRDB API URL
-            response = self.session.get(search_url, timeout=10)  # Use self.session  
-            response = requests.get(search_url)
-            
-            # Check for successful response
-            if response.status_code == 200:
-                data = response.json()
-                
-                # If SFV is available in the "nfolink" key
-                if 'nfolink' in data and data['nfolink']:
-                    # Replace '.nfo' with '.sfv' in the URL
-                    sfv_url = data['nfolink'][0].replace('.nfo', '.sfv')
-                    
-                    # Shorten the SFV URL using TinyURL
-                    shortened_sfv = self.shorten_url_with_tinyurl(sfv_url)
-                    return f"[ \x033SFV\x03: {shortened_sfv} ]"
-                else:
-                    return f"[ \x0305SFV\x03 ]"
-            else:
-                return f"[ \x0305SFV\x03 ]"
-        
-        except Exception as e:
-            return f"[ \x0305SFV\x03: Error retrieving SFV ]"  
-        
-    def get_srr_from_srrdb(self, releasename):
-        """Generate and shorten SRR file download link from srrdb.com"""
-        try:
-            # Construct the SRR download URL
-            srr_url = f"https://www.srrdb.com/download/srr/{releasename}"
-            response = requests.head(srr_url)
-            # Optional: Check if the file exists (status code 200)
-            
-            if response.status_code == 200:
-                # Shorten the SRR URL using TinyURL
-                shortened_srr = self.shorten_url_with_tinyurl(srr_url)
-                return f"[ \x033SRR\x03: {shortened_srr} ]"
-            else:
-                return f"[ \x0305SRR\x03 ]"
-            
-        except Exception as e:
-            return f"[ \x0305SRR\x03: Error retrieving SRR ]"        
-
-    def shorten_url_with_tinyurl(self, long_url):
-        """Shorten the given URL using TinyURL"""
-        try:
-            # Construct the TinyURL URL using their API format
-            tinyurl_api_url = f"https://tinyurl.com/api-create.php?url={long_url}"
-            response = requests.get(tinyurl_api_url)
-            
-            if response.status_code == 200:
-                # Return the shortened TinyURL
-                return response.text  # The response text is the shortened URL
-            else:
-                return long_url  # Return the original URL if TinyURL API fails
-        except Exception:
-            return long_url  # Fallback to the original URL if there’s an error
-
-    def format_time_ago(self, timestamp):
-        now = time.time()
-        diff = int(now - timestamp)
-        periods = [
-            ('year', 31536000),
-            ('day', 86400),
-            ('hour', 3600),
-            ('minute', 60),
-            ('second', 1)
-        ]
-        parts = []
-        for period_name, period_seconds in periods:
-            if diff >= period_seconds:
-                period_value, diff = divmod(diff, period_seconds)
-                parts.append(f"{period_value} {period_name}{'s' if period_value != 1 else ''}")
-        return " ".join(parts[:2]) + " ago" if parts else "just now"
-
-# PRE
+    # ========================
+    # COMMAND: PRE
+    # ========================
     def pre(self, irc, msg, args, release):
-        """<release> -- Fetches pre-release data from the database for a given release"""
-
-        # Security: Check if the user is authorized to use this command
-        #if msg.nick != 'klapvogn':  # Example of permission check, adjust as needed
-        #    irc.reply("Error: You do not have permission to use this command.")
-        #    return
-
-        # Determine query based on input
-        if release == "*":
-            query = "SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet FROM releases WHERE unixtime = (SELECT MAX(unixtime) FROM releases);"
-        else:
-            query = "SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet FROM releases WHERE releasename = ? LIMIT 1"
-
+        """<release> -- Fetches pre-release data with optimized queries"""
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
-
                 if release == "*":
-                    cursor.execute(query)
+                    cursor.execute("""
+                        SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                        FROM releases 
+                        ORDER BY unixtime DESC 
+                        LIMIT 1
+                    """)
                 else:
-                    cursor.execute(query, (release,))
+                    cursor.execute("""
+                        SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                        FROM releases 
+                        WHERE releasename = ?
+                        LIMIT 1
+                    """, (release,))
                 result = cursor.fetchone()
 
-            # If no result is found
             if not result:
                 irc.reply(f"\x0305Nothing found for\x03: {release}" if release != "*" else "\x0305No releases found.")
                 return 
 
-            # Unpack the result
+            # Unpack and process result
             releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet = result
-            section_formatted = self.section_colors.get(section, section)  # Default to section name if not found 
-
-            # Optimized time calculations
+            section_formatted = self.section_colors.get(section, section)
             time_ago = self.format_time_ago(unixtime)
             pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
-
-            # Conditional info formatting
-            info_string = f"[ \x033INFO\x03: {size} MB, {files} Files ] " if size and files else ""        
-
-            # Log the unpacked values
-            #self.log.info(f"Nuke: {nuked}, Reason: {reason}, Nukenet: {nukenet}")
-
-            nuked_details = {
-                1: f"[ \x0305Nuked: {reason or 'No reason'}\x03 => \x0305{nukenet or 'Unknown'}\x03 ]",
-                2: f"[ \x033UnNuked: {reason or 'No reason'}\x03 => \x033{nukenet or 'Unknown'}\x03 ]",
-                3: f"[ \x035ModNuked: {reason or 'No reason'}\x03 => \x035{nukenet or 'Unknown'}\x03 ]"
-            }.get(nuked, "")
-
-            # Include genre only if it exists and is not NULL
+            info_string = f"[ \x033INFO\x03: {size} MB, {files} Files ] " if size and files else ""
+            
+            # Nuke status mapping
+            nuke_status = {
+                1: ("\x0305Nuked", "\x0305"),
+                2: ("\x033UnNuked", "\x033"),
+                3: ("\x035ModNuked", "\x035")
+            }
+            status, color = nuke_status.get(nuked, ("", ""))
+            nuked_details = f"[ {status}: {reason or 'No reason'}{color} => {nukenet or 'Unknown'}{color} ]" if status else ""
+            
+            # Get links in parallel
+            nfo_text, sfv_text, srr_text = self.get_all_links(releasename)
+            
+            # Build response
             section_and_genre = f"[ {section_formatted} / {genre} ]" if genre and genre.lower() != 'null' else f"[ {section_formatted} ]"
+            message = (
+                f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_formatted} ] "
+                f"in {section_and_genre} {info_string}{nuked_details}"
+                f"{nfo_text}{sfv_text}{srr_text}"
+            )
+            irc.reply(message)
 
-            # Search for NFO file on srrdb.com
-            nfo_text, sfv_text, srr_text = self.get_all_links(releasename)  
-
-            # Send the appropriate response
-            message_parts = [
-            f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_formatted} ] ",
-            f"in {section_and_genre} ",
-            info_string,
-            nuked_details,
-            nfo_text,
-            sfv_text,
-            srr_text
-        ]
-            irc.reply(''.join(message_parts))
-
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during pre-release fetch: {e}")
-            irc.reply(f"Error fetching pre-release data: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error during pre-release fetch: {e}")
-            irc.reply(f"Unexpected error: {e}")
+            self.log.error(f"Error in pre: {e}")
+            irc.reply(f"Error retrieving pre data: {str(e)}")
     pre = commands.wrap(pre, ['text'])
 
     def dupe(self, irc, msg, args, release):
@@ -632,62 +592,47 @@ class PreDB(callbacks.Plugin):
 
     dupe = commands.wrap(dupe, ['text'])
 
+    # ========================
+    # COMMAND: GROUP
+    # ========================
     def group(self, irc, msg, args, groupname):
-        """+group <groupname> - Fetch statistics for the given group name."""
-
+        """+group <groupname> - Optimized group statistics"""
         try:
-            # Use the connection established by _get_connection() with a context manager
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
-
-                # Query to fetch statistics for the given group name
                 cursor.execute("""
                     SELECT 
                         COUNT(*) AS total_releases,
-                        SUM(CASE WHEN nuked = 1 THEN 1 ELSE 0 END) AS nukes,
-                        SUM(CASE WHEN nuked = 2 THEN 1 ELSE 0 END) AS unnukes,
+                        SUM(nuked = 1) AS nukes,
+                        SUM(nuked = 2) AS unnukes,
                         MIN(unixtime) AS first_pre_time,
                         MAX(unixtime) AS last_pre_time,
-                        (SELECT releasename FROM releases WHERE grp = ? ORDER BY unixtime ASC LIMIT 1) AS first_release,
-                        (SELECT releasename FROM releases WHERE grp = ? ORDER BY unixtime DESC LIMIT 1) AS last_release
+                        (SELECT releasename FROM releases WHERE grp = ? ORDER BY unixtime ASC LIMIT 1),
+                        (SELECT releasename FROM releases WHERE grp = ? ORDER BY unixtime DESC LIMIT 1)
                     FROM releases
                     WHERE grp = ?
                 """, (groupname, groupname, groupname))
 
                 result = cursor.fetchone()
-                total_releases, nukes, unnukes, first_pre_time, last_pre_time, first_release, last_release = result
-
-                # If no releases are found for the group
-                if total_releases == 0:
+                if not result or not result[0]:
                     irc.reply(f"\x0305Nothing found for\x03: {groupname}")
                     return
 
-                # Convert timestamps to human-readable format if needed
-                first_pre_time = datetime.utcfromtimestamp(first_pre_time).strftime('%Y-%m-%d %H:%M:%S') if first_pre_time else "N/A"
-                last_pre_time = datetime.utcfromtimestamp(last_pre_time).strftime('%Y-%m-%d %H:%M:%S') if last_pre_time else "N/A"
+                total, nukes, unnukes, first_time, last_time, first_release, last_release = result
+                first_time_fmt = datetime.utcfromtimestamp(first_time).strftime('%Y-%m-%d %H:%M:%S') if first_time else "N/A"
+                last_time_fmt = datetime.utcfromtimestamp(last_time).strftime('%Y-%m-%d %H:%M:%S') if last_time else "N/A"
 
-                # Reply with group statistics
-                irc.reply(f"\x033[ GROUP ]\x03 [ {groupname} ] [ \x033Releases\x03: {total_releases} ] [ \x0305NUKES\03: {nukes} ] [ \x033UNNUKES\03: {unnukes} ]")
-
-                # Reply with first release information
+                irc.reply(f"\x033[ GROUP ]\x03 [ {groupname} ] [ \x033Releases\x03: {total} ] "
+                          f"[ \x0305NUKES\03: {nukes} ] [ \x033UNNUKES\03: {unnukes} ]")
+                
                 if first_release:
-                    irc.reply(f"\x037[ FIRST RELEASE\x03 ] {first_release} [ Time: {first_pre_time} ]")
-
-                # Reply with last release information
+                    irc.reply(f"\x037[ FIRST RELEASE\x03 ] {first_release} [ Time: {first_time_fmt} ]")
                 if last_release:
-                    irc.reply(f"\x033[ LAST RELEASE\x03 ] {last_release} [ Time: {last_pre_time} ]")
+                    irc.reply(f"\x033[ LAST RELEASE\x03 ] {last_release} [ Time: {last_time_fmt} ]")
 
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error during group: {e}")
-            irc.reply(f"Error group search: {e}")
-        except sqlite3.Error as e:
-            self.log.error(f"Error group search: {e}")
-            irc.reply(f"Error group search: {e}")
         except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
-
-    # Wrap the command
+            self.log.error(f"Error in group: {e}")
+            irc.reply(f"Error retrieving group data: {str(e)}")
     group = commands.wrap(group, ['text'])
 
 # LASTNUKE
@@ -894,52 +839,49 @@ class PreDB(callbacks.Plugin):
             irc.reply(f"Unexpected error: {e}")
     section = commands.wrap(section, ['text'])
 
-# ADDPRE
+    # ========================
+    # BACKGROUND TASK HANDLING
+    # ========================
     def handle_addpre(self, irc, msg, args):
-        """Handles the `!addpre` command."""
+        """Threadpool-based addpre handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            irc.reply("You do not have permission to use this command.")
             return
-        
+            
         if len(args) < 2:
             irc.reply("Usage: !addpre <releasename> <section>")
             return
         
-        # Extract parameters from args
-        releasename = args[0]
-        section = args[1]
-
-        # Extract group from releasename
-        group = releasename.split('-')[-1] if '-' in releasename else None        
-        # Run database operation in a thread
-        Thread(target=self._addpre_thread, args=(irc, releasename, section, group)).start()
+        releasename, section = args[0], args[1]
+        group = releasename.split('-')[-1] if '-' in releasename else None
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._addpre_thread, irc, releasename, section, group)
 
     def _addpre_thread(self, irc, releasename, section, group):
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
+                # Use INSERT OR IGNORE to handle duplicates
                 cursor.execute(
-                    "INSERT INTO releases (releasename, section, grp) VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO releases (releasename, section, grp) VALUES (?, ?, ?)",
                     (releasename, section, group),
                 )
                 conn.commit()
-                self.announce_pre(irc, releasename, section)
-        except sqlite3.IntegrityError as e:
-            if "UNIQUE constraint failed" in str(e):
-                irc.reply(f"Release '{releasename}' already exists in the database.")
-            else:
-                self.log.error(f"SQLite integrity error in _addpre_thread: {e}")
+                if cursor.rowcount > 0:
+                    self.announce_pre(irc, releasename, section)
+                else:
+                    irc.reply(f"Release '{releasename}' already exists")
         except Exception as e:
-            self.log.error(f"Error in _addpre_thread: {e}")           
+            self.log.error(f"Addpre error: {e}")          
 
-# ADDNUKE
+    # ========================
+    # ADDNUKE (UPDATED)
+    # ========================
     def handle_addnuke(self, irc, msg, args):
-        """Handles the `!nuke` command."""
-        
+        """Threadpool-based nuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            irc.reply("You do not have permission to use this command.")
             return
-
+            
         if len(args) < 3:
             irc.reply("Usage: !nuke <releasename> <reason> <nukenet>")
             return
@@ -947,50 +889,47 @@ class PreDB(callbacks.Plugin):
         releasename = args[0]
         reason = ' '.join(args[1:-1])
         nukenet = args[-1]
-
-        # Kick off background thread to handle DB work
-        Thread(target=self._nuke_thread, args=(irc, releasename, reason, nukenet)).start()
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._nuke_thread, irc, releasename, reason, nukenet)
 
     def _nuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
 
                 # Check if already nuked
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
-                if result and result[0] == "1":
+                if result and result[0] == 1:
                     irc.reply(f"Release {releasename} is already nuked.")
                     return
 
                 # Perform the update
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
-                    ("1", reason, nukenet, releasename),
+                    (1, reason, nukenet, releasename),
                 )
                 conn.commit()
-                self.log.debug(f"Rows affected: {cursor.rowcount}")
 
-                if cursor.rowcount != 0:
-                    self.announce_nuke(irc, releasename, reason, nukenet)
+                if cursor.rowcount > 0:
+                    self.announce_nuke_status(irc, releasename, reason, nukenet, 1)
                 else:
-                    irc.reply(f"Release {releasename} not found in the database.")
-
-            # Optional delay to prevent spammy nukes
-            time.sleep(1)
+                    irc.reply(f"Release {releasename} not found in database")
 
         except Exception as e:
-            self.log.error(f"Error in _nuke_thread: {e}")          
+            self.log.error(f"Nuke error: {e}")
+            irc.reply(f"Error processing nuke: {str(e)}")
 
-# ADDUNNUKE
+    # ========================
+    # ADDUNNUKE (UPDATED)
+    # ========================
     def handle_addunnuke(self, irc, msg, args):
-        """Handles the `!unnuke` command."""
-        
+        """Threadpool-based unnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            irc.reply("You do not have permission to use this command.")
             return
-
+            
         if len(args) < 3:
             irc.reply("Usage: !unnuke <releasename> <reason> <nukenet>")
             return
@@ -998,50 +937,51 @@ class PreDB(callbacks.Plugin):
         releasename = args[0]
         reason = ' '.join(args[1:-1])
         nukenet = args[-1]
-
-        # Run the database operation in a thread
-        Thread(target=self._unnuke_thread, args=(irc, releasename, reason, nukenet)).start()
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._unnuke_thread, irc, releasename, reason, nukenet)
 
     def _unnuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
 
+                # Check if release exists and status
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
-                if result:
-                    if result[0] == "2":
-                        irc.reply(f"Release {releasename} is already unnuked.")
-                        return
-                else:
-                    irc.reply(f"Release {releasename} not found in the database.")
+                if not result:
+                    irc.reply(f"Release {releasename} not found")
+                    return
+                    
+                if result[0] == 2:
+                    irc.reply(f"Release {releasename} is already unnuked.")
                     return
 
+                # Perform the update
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
-                    ("2", reason, nukenet, releasename),
+                    (2, reason, nukenet, releasename),
                 )
                 conn.commit()
 
-                if cursor.rowcount != 0:
-                    self.announce_unnuke(irc, releasename, reason, nukenet)
+                if cursor.rowcount > 0:
+                    self.announce_nuke_status(irc, releasename, reason, nukenet, 2)
                 else:
-                    irc.reply(f"Release {releasename} not found in the database.")
-
-            time.sleep(1)  # Optional delay, as in your original
+                    irc.reply(f"Failed to unnuke {releasename}")
 
         except Exception as e:
-            self.log.error(f"Error in _nuke_thread: {e}")
+            self.log.error(f"Unnuke error: {e}")
+            irc.reply(f"Error processing unnuke: {str(e)}")
 
-# MODNUKE
+    # ========================
+    # MODNUKE (UPDATED)
+    # ========================
     def handle_addmodnuke(self, irc, msg, args):
-        """Handles the `!modnuke` command."""
-
+        """Threadpool-based modnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            irc.reply("You do not have permission to use this command.")
             return
-
+            
         if len(args) < 3:
             irc.reply("Usage: !modnuke <releasename> <reason> <nukenet>")
             return
@@ -1049,61 +989,63 @@ class PreDB(callbacks.Plugin):
         releasename = args[0]
         reason = ' '.join(args[1:-1])
         nukenet = args[-1]
-
-        # Run DB operation in a separate thread
-        Thread(target=self._modnuke_thread, args=(irc, releasename, reason, nukenet)).start()
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._modnuke_thread, irc, releasename, reason, nukenet)
 
     def _modnuke_thread(self, irc, releasename, reason, nukenet):
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
 
-                # Check if release exists and its nuke status
+                # Check if release exists and status
                 cursor.execute("SELECT nuked FROM releases WHERE releasename = ?", (releasename,))
                 result = cursor.fetchone()
 
                 if not result:
-                    irc.reply(f"Release {releasename} not found in the database.")
+                    irc.reply(f"Release {releasename} not found")
                     return
-                if result[0] == "3":
+                    
+                if result[0] == 3:
                     irc.reply(f"Release {releasename} is already modnuked.")
                     return
 
-                # Update the release
+                # Perform the update
                 cursor.execute(
                     "UPDATE releases SET nuked = ?, reason = ?, nukenet = ? WHERE releasename = ?",
-                    ("3", reason, nukenet, releasename),
+                    (3, reason, nukenet, releasename),
                 )
                 conn.commit()
 
                 if cursor.rowcount > 0:
-                    self.announce_modnuke(irc, releasename, reason, nukenet)
+                    self.announce_nuke_status(irc, releasename, reason, nukenet, 3)
                 else:
-                    irc.reply(f"Release {releasename} not found in the database.")
+                    irc.reply(f"Failed to modnuke {releasename}")
 
         except Exception as e:
-            self.log.error(f"Error in _nuke_thread: {e}")
+            self.log.error(f"Modnuke error: {e}")
+            irc.reply(f"Error processing modnuke: {str(e)}")
 
+    # ========================
+    # ADDINFO (UPDATED)
+    # ========================
     def handle_addinfo(self, irc, msg, args):
-        """Handles the `!info` command."""
-
+        """Threadpool-based info handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            irc.reply("You do not have permission to use this command.")
             return
-
+            
         if len(args) < 3:
             irc.reply("Usage: !info <releasename> <files> <size>")
             return
 
         releasename, files, size = args[0], args[1], args[2]
-
-        # Run the database update in a separate thread
-        Thread(target=self._addinfo_thread, args=(irc, releasename, files, size)).start()
-
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._addinfo_thread, irc, releasename, files, size)
 
     def _addinfo_thread(self, irc, releasename, files, size):
         try:
-            with self._get_connection() as conn:
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE releases SET files = ?, size = ? WHERE releasename = ?",
@@ -1111,13 +1053,8 @@ class PreDB(callbacks.Plugin):
                 )
                 conn.commit()
 
-                if cursor.rowcount == 0:
-                    pass
-                    
-            time.sleep(1)  # Optional: if you want a pause after processing
-
         except Exception as e:
-            self.log.error(f"Error in _addinfo_thread: {e}")
+            self.log.error(f"Addinfo error: {e}")
 
 
     def announce_pre(self, irc, releasename, section):
@@ -1139,56 +1076,26 @@ class PreDB(callbacks.Plugin):
         else:
             self.log.error("Target network omg is not connected. Cannot announce release.")
 
-# NUKE
-    def announce_nuke(self, irc, releasename, reason, nukenet):
-        """Announce a nuke to the #omgwtfnzbs.pre channel on another network."""
-        #self.log.info(f"Announcing nuke: {releasename} {reason} {nukenet}")
-        target_channel = "#omgwtfnzbs.pre"
+    # ========================
+    # UNIFIED ANNOUNCEMENTS
+    # ========================
+    def announce_nuke_status(self, irc, releasename, reason, nukenet, nuke_type):
+        """Unified nuke announcement handler"""
+        nuke_types = {
+            1: ("NUKE", "05"),
+            2: ("UNNUKE", "03"),
+            3: ("MODNUKE", "05")
+        }
+        name, color = nuke_types.get(nuke_type, ("UNKNOWN", "05"))
+        announcement = f"[ \x03{color}{name}\x03 ] {releasename} [ \x03{color}{reason}\x03 ] => \x03{color}{nukenet}\x03"
+        
+        if irc_state := self._get_target_irc_state():
+            irc_state.queueMsg(ircmsgs.privmsg("#omgwtfnzbs.pre", announcement))
 
-        # Get cached IRC state
-        irc_state = self._get_target_irc_state()
-
-        # Find the target network
-        if irc_state:
-                announcement = f"[ \x0305NUKE\x03 ] {releasename} [ \x0305{reason}\x03 ] => \x0305{nukenet}\x03"
-                irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
-               #self.log.info(f"Message sent to {target_channel} on omg network: {announcement}")
-        else:
-            self.log.error("Target network omg is not connected. Cannot announce nukes.")
-
-# MODNUKE
-    def announce_modnuke(self, irc, releasename, reason, nukenet):
-        """Announce a modnuke to the #omgwtfnzbs.pre channel on another network."""
-        #self.log.info(f"Announcing modnuke: {releasename} {reason} {nukenet}")
-        target_channel = "#omgwtfnzbs.pre"
-
-        # Get cached IRC state
-        irc_state = self._get_target_irc_state()
-
-        # Find the target network
-        if irc_state:
-                announcement = f"[ \x0305MODNUKE\x03 ] {releasename} [ \x0305{reason}\x03 ] => \x0305{nukenet}\x03"
-                irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
-                #self.log.info(f"Message sent to {target_channel} on omg network: {announcement}")
-        else:
-            self.log.error("Target network omg is not connected. Cannot announce modnuke.")
-
-# UNNUKE
-    def announce_unnuke(self, irc, releasename, reason, nukenet):
-        """Announce a unnuke to the #omgwtfnzbs.pre channel on another network."""
-        #self.log.info(f"Announcing unnuke: {releasename} {reason} {nukenet}")
-        target_channel = "#omgwtfnzbs.pre"
-
-        # Get cached IRC state
-        irc_state = self._get_target_irc_state()
-
-        # Find the target network
-        if irc_state:
-                announcement = f"[ \x0303UNNUKE\x03 ] {releasename} [ \x0303{reason}\x03 ] => \x0303{nukenet}\x03"
-                irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
-                #self.log.info(f"Message sent to {target_channel} on omg network: {announcement}")
-        else:
-            self.log.error("Target network omg is not connected. Cannot announce unnuke.")
+    # Update nuke handlers to use this unified method:
+    # - In _nuke_thread: self.announce_nuke_status(irc, releasename, reason, nukenet, 1)
+    # - In _unnuke_thread: self.announce_nuke_status(irc, releasename, reason, nukenet, 2)
+    # - In _modnuke_thread: self.announce_nuke_status(irc, releasename, reason, nukenet, 3)
 
     def doPrivmsg(self, irc, msg):
         """Intercepts private messages to parse `!addpre` and `!info` commands."""
@@ -1209,65 +1116,63 @@ class PreDB(callbacks.Plugin):
             args = text.split()[1:]  # Extract arguments after the command
             self.handle_addunnuke(irc, msg, args)    
 
-    # Database Cache
-    @lru_cache(maxsize=1)  # Cache one result since stats don’t change often
-    def _get_db_stats_cached(self, timestamp_key):
-        """Fetches statistics from the database with caching."""
-        return self._get_db_stats()
-    # End
-
-    def _get_db_stats(self):
-        """Fetches statistics from the database."""
+    # ========================
+    # DATABASE STATISTICS
+    # ========================
+    @lru_cache(maxsize=1)
+    def _get_db_stats_cached(self, _cache_key):
+        """Cached database statistics with optimized query"""
         try:
-            with self._get_connection() as conn:
+            start_of_today = datetime.combine(date.today(), datetime_time.min).timestamp()
+            with self.db_connection() as conn:
                 cursor = conn.cursor()
-                
-                # Apply performance optimizations
-                conn.execute("PRAGMA cache_size = -200000")  # Use more cache
-                conn.execute("PRAGMA synchronous = NORMAL")  # Faster writes
-                conn.execute("PRAGMA journal_mode = WAL")    # Improves concurrency
-
-                # Calculate the start of today
-                start_of_today = datetime.combine(date.today(), datetime_time.min).timestamp()
-
-                # Optimized query to fetch total, today's releases, nukes, and unnukes
-                query = """
+                cursor.execute("""
                     SELECT 
-                        (SELECT COUNT(*) FROM releases) AS total_releases,
-                        (SELECT COUNT(*) FROM releases WHERE unixtime >= ?) AS total_today,
-                        (SELECT COUNT(*) FROM releases WHERE nuked = '1') AS total_nuked,
-                        (SELECT COUNT(*) FROM releases WHERE nuked = '2') AS total_unnuked,
-                        (SELECT COUNT(*) FROM releases WHERE nuked = '3') AS total_modnuked,
-                        (SELECT releasename FROM releases ORDER BY unixtime DESC LIMIT 1) AS last_pre
-                """
-                
-                cursor.execute(query, (int(start_of_today),))
-                result = cursor.fetchone()
-                
-                if result:
-                    total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre = result
-                    last_pre = last_pre if last_pre else "None"
-                    return total_releases, total_today, total_nuked, total_unnuked, total_modnuked, last_pre
-                else:
-                    return None
-        except sqlcipher.DatabaseError as e:
-            self.log.error(f"SQLCipher database error: {e}")
-            return None
-        except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN unixtime >= ? THEN 1 ELSE 0 END) AS today,
+                        SUM(nuked = 1) AS nukes,
+                        SUM(nuked = 2) AS unnukes,
+                        SUM(nuked = 3) AS modnukes,
+                        (SELECT releasename FROM releases ORDER BY unixtime DESC LIMIT 1)
+                    FROM releases
+                """, (int(start_of_today),))
+                return cursor.fetchone()
+        except Exception:
             return None
 
     def db(self, irc, msg, args):
-        """Fetch and post the database statistics."""
-        timestamp_key = int(time.time() // 60)  # Cache refreshes every 60 seconds
-        stats = self._get_db_stats_cached(timestamp_key)        
+        """Efficient stats with time-based cache invalidation"""
+        cache_key = int(time.time() // 60)  # Cache for 60 seconds
+        stats = self._get_db_stats_cached(cache_key)
         if stats:
             total, today, nuked, unnuked, modnuked, last_pre = stats
-            message = (
-                f"[ PRE DATABASE ] [ \x033RELEASES\x03: {self.human_readable_number(total)} ] [ \x033TODAY\x03: {self.human_readable_number(today)} ] [ \x0305NUKES\x03: {self.human_readable_number(nuked)} ] [ \x033UNNUKES\x03 : {self.human_readable_number(unnuked)} ] [ \x034MODNUKED\x03 : {self.human_readable_number(modnuked)} ] [ \x0306Last Pre\x03: {last_pre} ]")
-            irc.reply(message)
+            irc.reply(
+                f"[ PRE DATABASE ] [ \x033RELEASES\x03: {self.human_readable_number(total)} ] "
+                f"[ \x033TODAY\x03: {self.human_readable_number(today)} ] [ \x0305NUKES\x03: {self.human_readable_number(nuked)} ] "
+                f"[ \x033UNNUKES\x03: {self.human_readable_number(unnuked)} ] [ \x034MODNUKES\x03: {self.human_readable_number(modnuked)} ] "
+                f"[ \x0306Last Pre\x03: {last_pre or 'None'} ]"
+            )
         else:
-            irc.reply("Failed to retrieve database statistics.")
+            irc.reply("Error retrieving database stats")
+            return None
+        
+    # ========================
+    # HELPER FUNCTIONS
+    # ========================
+    def _get_target_irc_state(self):
+        """Cached IRC state lookup"""
+        if self.target_irc_state and self.target_irc_state in world.ircs:
+            return self.target_irc_state
+            
+        for irc_state in world.ircs:
+            if "omg" in irc_state.network:
+                self.target_irc_state = irc_state
+                return irc_state
+        return None
+    
+    def human_readable_number(self, n):
+        """Convert large numbers into a human-readable format with commas (e.g., 12,345,678)."""
+        return f"{n:,}"
 
     def prehelp(self, irc, msg, args):
         """Sends help information about the Kudos plugin in a private message."""
