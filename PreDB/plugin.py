@@ -336,6 +336,28 @@ class PreDB(callbacks.Plugin):
             days = diff // 86400
             return f"{days} day{'s' if days != 1 else ''} ago"
 
+    # Pre Search Cache
+    @lru_cache(maxsize=100)  # Caches the last 100 queries to improve performance
+    def fetch_release(self, release):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if release == "*":
+                cursor.execute("""
+                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                    FROM releases 
+                    ORDER BY unixtime DESC 
+                    LIMIT 1;
+                """)
+            else:
+                cursor.execute("""
+                    SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                    FROM releases 
+                    WHERE releasename = ?
+                    LIMIT 1;
+                """, (release,))
+            return cursor.fetchone()
+    # End
+
 # CHANGE UNIXTIME
     def unixtime(self, irc, msg, args):
         """Handles the `+unixtime` command to update the unixtime for a release."""
@@ -1160,9 +1182,9 @@ class PreDB(callbacks.Plugin):
             irc.reply("Error retrieving database stats")
             return None
         
-    # ========================
+    # =================
     # HELPER FUNCTIONS
-    # ========================
+    # =================
     def _get_target_irc_state(self):
         """Cached IRC state lookup"""
         if self.target_irc_state and self.target_irc_state in world.ircs:
@@ -1180,14 +1202,20 @@ class PreDB(callbacks.Plugin):
 
     def prehelp(self, irc, msg, args):
         """Sends help information about the Kudos plugin in a private message."""
+        # Announce in channel if command was used publicly
+        if irc.isChannel(msg.args[0]):
+            irc.reply(f"sending prehelp to {msg.nick} in PM", private=False)
+        
+        # Send help content via PM
         help_messages = [
             "\x02\x1f:: PREHELP ::\x1f\x02",
-            " ",  # This adds an empty line
+            " ",  # Empty line for spacing
             "+pre <releasename>: To search for one specific result.",
             "+dupe <part of the releasename>: Last 10 in private",
             "+group <group name>: Shows group stats of the specified group, in private",
             "+lastnuke <group>: Shows last nuked release in private (Groupname is optional).",
             "+lastunnuke <group>: Shows last unnuked release in private (Groupname is optional).",
+            "+lastmodnuke <group>: Shows last unnuked release in private (Groupname is optional).",
             "+section <section> : Shows last 10 releases in the selected section",
             "+db : Shows statistics of the DataBase.",
         ]
