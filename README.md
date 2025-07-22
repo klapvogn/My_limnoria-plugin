@@ -39,6 +39,7 @@ echo 'PATH="$HOME/.local/bin:$PATH"' >> ~/.$(echo $SHELL|cut -d/ -f3)rc
 source ~/.$(echo $SHELL|cut -d/ -f3)rc
 ```
 If you have an error saying `No module named pip`, install pip using this guide:
+
 https://pip.pypa.io/en/stable/installing/
 
 
