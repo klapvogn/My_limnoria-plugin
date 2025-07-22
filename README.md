@@ -10,6 +10,7 @@ First, install Limnoria’s optional dependencies (you can skip this step, but s
 `sudo python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade`
 
 Then Limnoria itself:
+
 `sudo python3 -m pip install limnoria --upgrade`
 
 
