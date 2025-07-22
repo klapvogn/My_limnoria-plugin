@@ -1,4 +1,11 @@
 # Here is how to install Limnoria
+Global installation (with root access)
+
+If you do not have root access, skip this section.
+
+If you are logged in as root, you can remove `sudo` from the install commands.
+
+First, install Limnoria’s optional dependencies (you can skip this step, but some features won’t be available):
 
 
 
