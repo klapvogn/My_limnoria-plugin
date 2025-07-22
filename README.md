@@ -42,6 +42,11 @@ If you have an error saying `No module named pip`, install pip using this guide:
 
 https://pip.pypa.io/en/stable/installing/
 
+Now to start the bot, run, still from within the ‘runbot’ directory:
+```
+supybot yourbotnick.conf
+```
+And watch the magic!
 
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QC2EH6ZRDL37L)
