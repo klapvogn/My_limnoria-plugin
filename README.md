@@ -7,7 +7,10 @@ If you are logged in as root, you can remove `sudo` from the install commands.
 
 First, install Limnoria’s optional dependencies (you can skip this step, but some features won’t be available):
 
+`sudo python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade`
 
+Then Limnoria itself:
+`sudo python3 -m pip install limnoria --upgrade`
 
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QC2EH6ZRDL37L)
