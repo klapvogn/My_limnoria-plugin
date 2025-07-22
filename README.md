@@ -14,6 +14,11 @@ Then Limnoria itself:
 `sudo python3 -m pip install limnoria --upgrade`
 
 If you have an error saying `No module named pip`, install pip using your package manager (the package is usually named `python3-pip`).
+If you have an error about `externally-managed-environment`, you need to setup a virtualenv first, then re-run the commands above:
+```
+python3 -m venv /opt/venvs/limnoria  # creates a virtualenv at the given path
+. /opt/venvs/limnoria/bin/activate   # enables the virtualenv in the current shell
+```
 
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QC2EH6ZRDL37L)
