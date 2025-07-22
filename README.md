@@ -7,11 +7,15 @@ If you are logged in as root, you can remove `sudo` from the install commands.
 
 First, install Limnoria’s optional dependencies (you can skip this step, but some features won’t be available):
 
-`sudo python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade`
+```
+sudo python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade
+```
 
 Then Limnoria itself:
 
-`sudo python3 -m pip install limnoria --upgrade`
+```
+sudo python3 -m pip install limnoria --upgrade
+```
 
 If you have an error saying `No module named pip`, install pip using your package manager (the package is usually named `python3-pip`).
 If you have an error about `externally-managed-environment`, you need to setup a virtualenv first, then re-run the commands above:
