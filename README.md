@@ -1,5 +1,6 @@
 # Here is how to install Limnoria
-Global installation (with root access)
+
+# Global installation (with root access)
 
 If you do not have root access, skip this section.
 
@@ -24,6 +25,14 @@ python3 -m venv /opt/venvs/limnoria  # creates a virtualenv at the given path
 . /opt/venvs/limnoria/bin/activate   # enables the virtualenv in the current shell
 ```
 
+# Local installation (without root access)
+If you have followed the previous section, skip this one.
+
+First we install requirements (you can skip it, but some features won’t be available) and then Limnoria itself.:
+```
+python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade
+python3 -m pip install limnoria --upgrade
+```
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QC2EH6ZRDL37L)
 
