@@ -33,6 +33,14 @@ First we install requirements (you can skip it, but some features won’t be ava
 python3 -m pip install -r https://raw.githubusercontent.com/progval/Limnoria/master/requirements.txt --upgrade
 python3 -m pip install limnoria --upgrade
 ```
+You might need to add $HOME/.local/bin to your PATH.:
+```
+echo 'PATH="$HOME/.local/bin:$PATH"' >> ~/.$(echo $SHELL|cut -d/ -f3)rc
+source ~/.$(echo $SHELL|cut -d/ -f3)rc
+```
+If you have an error saying `No module named pip`, install pip using this guide:
+https://pip.pypa.io/en/stable/installing/
+
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=QC2EH6ZRDL37L)
 
