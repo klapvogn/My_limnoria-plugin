@@ -55,7 +55,7 @@ class Restart(callbacks.Plugin):
         # Replace the currently running Supybot process with another one with the same
         # args.
         os.execl(sys.executable, os.path.basename(sys.executable), *sys.argv)
-
+#test
     @wrap(['owner', additional('text')])
     def restart(self, irc, msg, args, text):
         """[<text>]
