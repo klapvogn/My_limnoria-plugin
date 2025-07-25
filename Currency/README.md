@@ -1,4 +1,4 @@
-## Currency eeeee
+## Currency
 
 What is Currency?
 
