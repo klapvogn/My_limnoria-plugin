@@ -1,4 +1,4 @@
-## Activity
+## Activity -
 
 What is Activity?
 
