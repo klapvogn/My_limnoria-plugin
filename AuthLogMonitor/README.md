@@ -23,4 +23,7 @@ by default the code is made so it : Obscure IP (show first two octets only)
 
 `session closed for user user`
 
+# Disconncted
+
+`Disconnect from xx.xx.xx.xx port 16531:11: disconnected by user`
 
