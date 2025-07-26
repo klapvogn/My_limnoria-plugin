@@ -6,6 +6,7 @@ I made this plugin as a fun thing. So when you would like to see what your bandw
 ## What you need
 
 1: `pip install paramiko`
+2: `sudo apt-get install ifstat`
 
 2: Then edit these lines:
 ```
