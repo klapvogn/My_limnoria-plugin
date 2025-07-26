@@ -7,7 +7,7 @@ I made thing plugin, so I could see what happens in the `/var/log/auth.log` that
 
 `pip install chardet` 
 
-Read more about here: https://pypi.org/project/chardet/
-
+Read more about here: 
+[chardet](https://pypi.org/project/chardet/)
 
 The plugin autoload on restart of the bot
