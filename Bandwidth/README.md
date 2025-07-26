@@ -9,7 +9,7 @@ I made this plugin as a fun thing. So when you would like to see what your bandw
 
 2: `sudo apt-get install ifstat`
 
-2: Then edit these lines:
+3: Then edit these lines:
 ```
         # SSH credentials for the remote machine
         self.ssh_host = 'REMOTE IP'
