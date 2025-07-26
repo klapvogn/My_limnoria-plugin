@@ -26,5 +26,6 @@ by default the code is made so it : Obscure IP (show first two octets only)
 # Disconncted
 
 `Received disconnect from xx.xx.xx.xx port 16531:11: disconnected by use`
+
 `Disconnect from xx.xx.xx.xx port 16531:11: disconnected by user`
 
