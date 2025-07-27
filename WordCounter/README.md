@@ -7,11 +7,11 @@ I made this plugin as a fun thing. All it does it's counts lines and words in ch
 
 `+stats - Shows the stats in the channel you are in`
 
-`+stats 2025-07 (uses current channel)`
+`+stats 2025-07 uses current channel you are in`
 
-`+stats #CHAN - Shows the stats in the channel you are in`
+`+stats #CHAN - Shows the stats from a giving channel`
 
-`+stats #CHAN 2025-07`
+`+stats #CHAN 2025-07 - shows stats #CHAN YYY-MMM`
 
 # Output
 
