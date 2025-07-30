@@ -1,7 +1,19 @@
 I have taking this plugin an gave it a facelift! Like in how the announcements are made to the channel!
 
-Val's Original plugin can be found here <https://github.com/progval/Limnoria/tree/master/plugins/RSS>
+Val's Original plugin can be found here: <https://github.com/progval/Limnoria/tree/master/plugins/RSS>
 
+When you store feeds to the database `RSS_announced.flat`
+it stores it as you type in on the channel.
+
+Like:
+
+``+rss add GEEKWIRE https://www.geekwire.com/feed/``
+
+``+rss announce add GEEKWIRE``
+
+It will announce it like:
+
+``GEEKWIRE``
 
 
 
