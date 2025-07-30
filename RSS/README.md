@@ -1,10 +1,13 @@
-.. _plugin-RSS:
+I have taking this plugin an gave it a facelift! Like in how the announcements are made to the channel!
+
+Val's Original plugin can be found here <https://github.com/progval/Limnoria/tree/master/plugins/RSS>
+
+
+
+
 
 Documentation for the RSS plugin for Supybot
 ============================================
-
-I have taking this plugin an gave it a facelift! Like in how the announcements are made to the channel!
-
 
 Purpose
 -------
