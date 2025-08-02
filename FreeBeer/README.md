@@ -1,4 +1,4 @@
-## FreeBeer
+FreeBeer
 ============================================
 
 What does it do?
@@ -10,4 +10,5 @@ You can alter when it should announce in the code
 
 
 ``Free beer for everyone 🍺🍻! <user> is paying!``
+
 
