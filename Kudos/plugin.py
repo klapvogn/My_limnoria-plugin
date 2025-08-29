@@ -13,7 +13,7 @@ class Kudos(callbacks.Plugin):
 
     def _init_db(self):
         """Initialize the SQLite database."""
-        self.conn = sqlite3.connect('/home/ubuntu/limnoria/plugins/Kudos/kudos.db')  # Create or connect to a database file
+        self.conn = sqlite3.connect('/home/klapvogn/limnoria/plugins/Kudos/kudos.db')  # Create or connect to a database file
         self.cursor = self.conn.cursor()
 
         # Create a table if it doesn't exist with fields for different kudos types
@@ -32,13 +32,14 @@ class Kudos(callbacks.Plugin):
             )
         ''')
         self.conn.commit()
+        
 
     def _normalize_nick(self, nick):
         """Normalize the nickname (e.g., remove special characters like '+')."""
         return re.sub(r'[^a-zA-Z0-9]', '', nick.lower())
 
     def _get_score(self, nick):
-        """Helper function to get the current score for a user from the database."""
+        """\x02Helper function to get the current score for a user from the database.\x02"""
         norm_nick = self._normalize_nick(nick)
         self.cursor.execute('''
             SELECT positive, negative, points, informative_pos, funny_pos, nerd_pos, troll_pos, wrong_neg, troll_neg
@@ -102,13 +103,21 @@ class Kudos(callbacks.Plugin):
 
     def _parse_kudos(self, irc, msg, text):
         """Parses a kudos message like 'nick++f'."""
-        pattern = re.compile(r'(\S+)(\+\+|\-\-)([i|f|n|t|w]*)')
-        match = pattern.match(text)
+        # Use lookahead instead of word boundary at the end
+        pattern = re.compile(r'\b([a-zA-Z0-9_\[\]\\^{}|`-]+)(\+\+|\-\-)([ifntw]*)(?=\s|$|\.|,|;)')
+        match = pattern.search(text)
 
         if match:
             nick = match.group(1)
             kudos_cmd = match.group(2)
             category = match.group(3)
+
+            # Additional safety check: ensure it's not part of common URL patterns
+            if re.search(r'https?://|www\.|\.(com|org|net|edu|gov)|/', text):
+                # If the text contains URL indicators, be more careful
+                context = text[max(0, match.start()-10):min(len(text), match.end()+10)]
+                if re.search(r'[:/\.\?=]', context):
+                    return  # Probably part of a URL
 
             user = msg.nick
             if user == nick:
@@ -140,7 +149,7 @@ class Kudos(callbacks.Plugin):
                 'w': 'Wrong'
             }.get(category, 'Kudos')
 
-            irc.reply(f"{nick}: +{positive}, -{negative} = {net}. {category_text} ({pos_increment or neg_increment})")          
+            irc.reply(f"{nick}: +{positive}, -{negative} = {net}. {category_text} ({pos_increment or neg_increment})")       
 
     def doPrivmsg(self, irc, msg):
         """Intercept all messages and look for kudos-like patterns."""
@@ -150,7 +159,7 @@ class Kudos(callbacks.Plugin):
     def score(self, irc, msg, args, nick):
         """\x02[nick] (Displays the current kudos score of nick.)\x02"""
         score = self._get_score(nick)
-        irc.reply(f"{nick} has {score['positive']} \x033positive\x03 and {score['negative']} \x034negative\x03 kudos. (Net score: {score['points']})")     
+        irc.reply(f"{nick} has {score['positive']} \x033Positive\x03 and {score['negative']} \x034Negative\x03 kudos. (Net score: {score['points']})")     
 
     score = wrap(score, ['nick'])
 
@@ -166,9 +175,9 @@ class Kudos(callbacks.Plugin):
         scores_list = []
         for row in rows:
             nick, positive, negative, points, informative, funny, nerd, troll_pos, wrong, troll_neg = row
-            breakdown = (f"(Informative: {informative} - Funny: {funny} - Nerd: {nerd} - Troll: {troll_pos}) / "
-                         f"(Wrong: -{wrong} - Troll: -{troll_neg})")
-            scores_list.append(f"{nick}: {points} {breakdown} (\x033positive\x03: {positive}, \x034negative\x03: {negative})")
+            breakdown = (f"(\x033Informative\x03: {informative} - \x033Funny\x03: {funny} - \x033Nerd\x03: {nerd} - \x033Troll\x03: {troll_pos}) / "
+                         f"(\x034Wrong\x03: -{wrong} - \x034Troll\x03: -{troll_neg})")
+            scores_list.append(f"{nick}: {points} {breakdown} (\x033Positive\x03: {positive}, \x034Negative\x03: {negative})")
 
         irc.reply(" | ".join(scores_list))
 
