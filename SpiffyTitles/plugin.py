@@ -155,6 +155,7 @@ class SpiffyTitles(callbacks.Plugin):
         """
         self.handlers["youtube.com"] = self.handler_youtube
         self.handlers["youtu.be"] = self.handler_youtube
+        self.handlers["music.youtube.com"] = self.handler_youtube 
 
     def add_imgur_handlers(self):
         # Images mostly
@@ -841,6 +842,10 @@ class SpiffyTitles(callbacks.Plugin):
         youtube_handler_enabled = self.registryValue("youtube.enabled", channel)
         if not youtube_handler_enabled:
             return self.handler_default(url, channel)
+        
+        # Check if this is a YouTube Music URL
+        is_youtube_music = "music.youtube.com" in url
+
         developer_key = self.registryValue("youtube.developerKey")
         if not developer_key:
             log.info(
@@ -848,13 +853,20 @@ class SpiffyTitles(callbacks.Plugin):
                 "for instructions."
             )
             return None
+        
         log.debug("SpiffyTitles: calling Youtube handler for %s" % (url))
         video_id = self.get_video_id_from_url(url, domain)
+
+        # For YouTube Music playlists, we need to handle them differently
+        if is_youtube_music and "playlist" in url:
+            return self.handler_youtube_music_playlist(url, channel)        
+
         if not video_id:
             log.debug(
                 "SpiffyTitles: Failed to get YouTube video ID for URL: {0}".format(url)
             )
             return self.handler_default(url, channel)
+        
         yt_template = Template(self.registryValue("youtube.template", channel))
         title = ""
         options = {
@@ -886,6 +898,13 @@ class SpiffyTitles(callbacks.Plugin):
             snippet = video["snippet"]
             title = snippet["title"]
             statistics = video["statistics"]
+
+            # Add YouTube Music logo if it's a music URL
+            if is_youtube_music:
+                yt_logo = self.get_youtube_music_logo(channel)
+            else:
+                yt_logo = self.get_youtube_logo(channel)
+
             view_count = 0
             like_count = 0
             dislike_count = 0
@@ -931,6 +950,7 @@ class SpiffyTitles(callbacks.Plugin):
                     "published": published,
                     "restricted": restricted,
                     "yt_logo": yt_logo,
+                    "is_music": is_youtube_music,
                 }
             )
             title = compiled_template
@@ -938,12 +958,71 @@ class SpiffyTitles(callbacks.Plugin):
             log.error(
                 "SpiffyTitles: IndexError. Youtube API JSON response: %s" % (str(e))
             )
+
         # If we found a title, return that. otherwise, use default handler
         if title:
             return title
         else:
             log.debug("SpiffyTitles: falling back to default handler")
             return self.handler_default(url, channel)
+
+    def handler_youtube_music_playlist(self, url, channel):
+        """
+        Handles YouTube Music playlist URLs
+        """
+        log.debug("SpiffyTitles: handling YouTube Music playlist: %s" % url)
+        
+        # Extract playlist ID from URL
+        parsed_url = urlparse(url)
+        query_params = dict(parse_qsl(parsed_url.query))
+        playlist_id = query_params.get('list')
+        
+        if not playlist_id:
+            return self.handler_default(url, channel)
+        
+        developer_key = self.registryValue("youtube.developerKey")
+        if not developer_key:
+            return self.handler_default(url, channel)
+        
+        # Get playlist info
+        api_url = "https://www.googleapis.com/youtube/v3/playlists"
+        options = {
+            "part": "snippet,contentDetails",
+            "maxResults": 1,
+            "key": developer_key,
+            "id": playlist_id,
+        }
+        
+        try:
+            request = requests.get(
+                api_url, params=options, timeout=self.timeout, proxies=self.proxies
+            )
+            request.raise_for_status()
+            response = json.loads(request.content.decode())
+            
+            if response.get("items"):
+                playlist = response["items"][0]
+                snippet = playlist["snippet"]
+                content_details = playlist["contentDetails"]
+                
+                yt_music_template = Template(
+                    self.registryValue("youtube.musictemplate", channel)
+                )
+                
+                title = yt_music_template.render({
+                    "title": snippet.get("title", "Unknown Playlist"),
+                    "channel_title": snippet.get("channelTitle", "Unknown Artist"),
+                    "item_count": content_details.get("itemCount", 0),
+                    "description": snippet.get("description", ""),
+                    "yt_music_logo": self.get_youtube_music_logo(channel),
+                })
+                
+                return title
+                
+        except Exception as e:
+            log.error("SpiffyTitles: YouTube Music playlist error: %s" % str(e))
+        
+        return self.handler_default(url, channel)
 
     def get_duration_from_seconds(self, duration_seconds):
         m, s = divmod(duration_seconds, 60)
@@ -961,6 +1040,18 @@ class SpiffyTitles(callbacks.Plugin):
         else:
             yt_logo = "{0}\x0F".format(self.registryValue("youtube.logo", channel))
         return yt_logo
+
+    def get_youtube_music_logo(self, channel):
+        use_bold = self.registryValue("useBold", channel)
+        if use_bold:
+            yt_music_logo = "{0}\x0F\x02".format(
+                self.registryValue("youtube.musicLogo", channel) or "🎵 YouTube Music"
+            )
+        else:
+            yt_music_logo = "{0}\x0F".format(
+                self.registryValue("youtube.musicLogo", channel) or "🎵 YouTube Music"
+            )
+        return yt_music_logo
 
     def get_total_seconds_from_duration(self, input):
         """
@@ -1418,7 +1509,7 @@ class SpiffyTitles(callbacks.Plugin):
             return self.handler_default(url, channel)
         
         omg_url = "https://api.omgwtfnzbs.org/json/"
-        options = {"api": api_key, "user": user_key, "id": nzbid}
+        options = {"api": api_key, "user": user_key, "nukes": 1, "id": nzbid}
         
         try:
             request = requests.get(
@@ -1541,7 +1632,31 @@ class SpiffyTitles(callbacks.Plugin):
         else:
             formatted_time = "N/A"
 
-        # Prepare template variables (adjust according to the actual data structure)
+        # Extract and process nuked status
+        nuked_info = response.get("nuked", "")
+        log.debug(f"SpiffyTitles: Raw nuked info: '{nuked_info}' (type: {type(nuked_info)})")
+
+        nuked = ""
+        if nuked_info:
+            log.debug(f"SpiffyTitles: nuked_info exists: '{nuked_info}'")
+            if isinstance(nuked_info, str) and nuked_info.startswith("1:"):
+                # Extract the reason part after "1:"
+                nuked_reason = nuked_info[2:]  # Remove "1:" prefix
+                if nuked_reason:  # Only show if there's actually a reason
+                    nuked = f" :: \x0305NUKED: {nuked_reason}\x03 ::"
+                    log.debug(f"SpiffyTitles: Processed nuked status: '{nuked}'")
+                else:
+                    nuked = f" :: \x0304NUKED\x03"
+                    log.debug("SpiffyTitles: Nuked but no reason provided")
+            elif isinstance(nuked_info, str) and nuked_info.startswith("0:"):
+                nuked = ""  # Not nuked, leave empty
+                log.debug("SpiffyTitles: Not nuked (starts with 0:)")
+            else:
+                log.debug(f"SpiffyTitles: Unhandled nuked format: '{nuked_info}'")
+        else:
+            log.debug("SpiffyTitles: No nuked info found")
+
+        # Prepare template variables
         release = response.get("release", "N/A")
         log.debug(f"SpiffyTitles: Extracted release: {release}")
 
@@ -1550,10 +1665,10 @@ class SpiffyTitles(callbacks.Plugin):
             "cattext": cattext,
             "sizebytes": size_str,
             "usenetage": formatted_time,
+            "nuked": nuked,  # This will be empty string if not nuked
             "omg_logo": self.get_omgwtfnzbs_logo(channel),
         }
 
-        # Log the template variables for debugging
         log.debug(f"SpiffyTitles: Template variables: {template_vars}")
 
         # Assuming the response is a dictionary with the release details
@@ -1661,6 +1776,7 @@ class SpiffyTitles(callbacks.Plugin):
             return self.handler_default(url, channel)
 
         self.log.debug("SpiffyTitles: calling reddit handler for %s" % (url))
+        
         patterns = {
             "thread": {
                 "pattern": r"^/r/(?P<subreddit>[^/]+)/comments/(?P<thread>[^/]+)"
@@ -1730,7 +1846,8 @@ class SpiffyTitles(callbacks.Plugin):
             self.log.error(f"SpiffyTitles: KeyError - {e}")
             return self.handler_default(url, channel)
         except Exception as e:
-            self.log.error(f"SpiffyTitles: Reddit Error: {e}")
+            error_message = e.response.text if hasattr(e, "response") else str(e)
+            self.log.error(f"SpiffyTitles: Reddit Error: {error_message}")
             return self.handler_default(url, channel)
 
         if data:
