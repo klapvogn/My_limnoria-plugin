@@ -10,3 +10,5 @@ bot: Arrow (2012) - Ended on The CW | Seasons: 8 | Rating: 7.4/10 | Genres: Dram
 was missing and presumed dead for five years before being discovered alive on a remote island in the Pacific. He returned home to Starling City, welcomed by his devoted
 mother Moira, beloved sister Thea and former flame Laurel Lance. [...]
 ```
+
+The `[...]` is _smart_truncate I have added, so it dosn't flood the channel with an pretty long summary
