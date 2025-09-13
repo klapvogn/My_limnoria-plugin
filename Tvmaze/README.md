@@ -11,4 +11,4 @@ was missing and presumed dead for five years before being discovered alive on a 
 mother Moira, beloved sister Thea and former flame Laurel Lance. [...]
 ```
 
-The `[...]` is _smart_truncate I have added, so it dosn't flood the channel with an pretty long summary
+The `[...]` is `_smart_truncate` I have added, so it dosn't flood the channel with an pretty long summary
