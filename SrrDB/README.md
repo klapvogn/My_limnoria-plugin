@@ -4,7 +4,7 @@ What is SrrDB?
 
 This plugin enables you to search for results on srrdb.com:
 
-It added available: SRS, SFV, NFO and M3U to the output. It also gives the status for confirmed or compressed also 
+It added available: SRS, SFV, NFO and M3U to the output. It also gives the status for confirmed and compressed also 
 
 ## Audio
 
