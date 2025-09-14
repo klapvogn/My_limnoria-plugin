@@ -80,46 +80,57 @@ class SrrDB(callbacks.Plugin):
             log.error(f"SrrDB: API request failed for {url}: {e}")
             return None
 
-    def _search_single_type(self, query, confirmed):
-        """Search for either confirmed or unconfirmed releases"""
+    def _search_single_type(self, query, confirmed, compressed=None):
+        """Search for releases with specific confirmed and compressed status"""
         encoded_query = urllib.parse.quote(query)
         confirmed_param = "yes" if confirmed else "no"
+        
+        # Build URL with parameters
         url = f"https://api.srrdb.com/v1/search/r:{encoded_query}/confirmed:{confirmed_param}"
+        
+        # Add compressed parameter if specified
+        if compressed is not None:
+            compressed_param = "yes" if compressed else "no"
+            url += f"/compressed:{compressed_param}"
+        else:
+            compressed_param = "unknown"
         
         data = self._make_api_request(url)
         if data and 'results' in data and data['results']:
             for result in data['results']:
                 result['confirmed'] = confirmed_param
+                result['compressed'] = compressed_param
             return data['results']
         return []
 
     def _search_srrdb(self, query):
-        """Search srrDB API for releases - both confirmed and unconfirmed"""
+        """Search srrDB API for releases - both confirmed/unconfirmed and compressed/uncompressed"""
         try:
             # Use ThreadPoolExecutor for concurrent requests
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit both searches concurrently
-                future_confirmed = executor.submit(self._search_single_type, query, True)
-                future_unconfirmed = executor.submit(self._search_single_type, query, False)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                # Submit all search combinations concurrently
+                futures = []
+                
+                # Search all combinations of confirmed/unconfirmed and compressed/uncompressed
+                for confirmed in [True, False]:
+                    for compressed in [True, False]:
+                        future = executor.submit(self._search_single_type, query, confirmed, compressed)
+                        futures.append(future)
+                
+                # Also search without compressed parameter for broader results
+                futures.append(executor.submit(self._search_single_type, query, True, None))
+                futures.append(executor.submit(self._search_single_type, query, False, None))
                 
                 # Collect results
                 results = []
                 
-                # Get confirmed results
-                try:
-                    confirmed_results = future_confirmed.result(timeout=8)
-                    if confirmed_results:
-                        results.extend(confirmed_results)
-                except Exception as e:
-                    log.error(f"SrrDB: Error getting confirmed results: {e}")
-                
-                # Get unconfirmed results
-                try:
-                    unconfirmed_results = future_unconfirmed.result(timeout=8)
-                    if unconfirmed_results:
-                        results.extend(unconfirmed_results)
-                except Exception as e:
-                    log.error(f"SrrDB: Error getting unconfirmed results: {e}")
+                for future in futures:
+                    try:
+                        search_results = future.result(timeout=8)
+                        if search_results:
+                            results.extend(search_results)
+                    except Exception as e:
+                        log.error(f"SrrDB: Error getting search results: {e}")
                 
                 return results
                 
@@ -185,6 +196,10 @@ class SrrDB(callbacks.Plugin):
             # For non-audio releases (TV, movies, etc.), use direct naming
             return f"https://www.srrdb.com/download/file/{urllib.parse.quote(release_name)}/{lower_name}.{file_type}"
 
+    def _check_sfv_exists(self, release_name):
+        """Check if SFV file exists for a release on srrDB with caching"""
+        return self._check_file_exists(release_name, 'sfv', self._sfv_cache)
+
     def _check_m3u_exists(self, release_name):
         """Check if M3U file exists for a release on srrDB with caching"""
         # M3U files are typically only available for audio releases
@@ -194,14 +209,6 @@ class SrrDB(callbacks.Plugin):
         if not is_audio_release:
             return False  # M3U files are only for audio releases
         
-        return self._check_file_exists(release_name, 'm3u', self._m3u_cache)
-
-    def _check_sfv_exists(self, release_name):
-        """Check if SFV file exists for a release on srrDB with caching"""
-        return self._check_file_exists(release_name, 'sfv', self._sfv_cache)
-
-    def _check_m3u_exists(self, release_name):
-        """Check if M3U file exists for a release on srrDB with caching"""
         return self._check_file_exists(release_name, 'm3u', self._m3u_cache)
 
     def _format_size(self, size):
@@ -233,19 +240,31 @@ class SrrDB(callbacks.Plugin):
         if has_m3u:  # Only show M3U if it exists
             status_parts.append(ircutils.mircColor("M3U", 'green'))
 
-        # Confirmation status
-        if result.get('confirmed') == "yes":
-            status_text = "Status: " + ircutils.mircColor("Confirmed", 'green')
-        else:
-            status_text = "Status: " + ircutils.mircColor("Unconfirmed", 'red')
-        status_parts.append(status_text)
-        
         # Special flags
         if result.get('isForeign') == "yes":
             status_parts.append(ircutils.mircColor("Foreign", 'orange'))
+            
+        # Combined confirmation and compressed status
+        status_labels = []
         
-        return " | ".join(status_parts)
+        # Add confirmation status
+        if result.get('confirmed') == "yes":
+            status_labels.append(ircutils.mircColor("Confirmed", 'green'))
+        else:
+            status_labels.append(ircutils.mircColor("Unconfirmed", 'red'))
+        
+        # Add compressed status (only if known)
+        if result.get('compressed') == "yes":
+            status_labels.append(ircutils.mircColor("Compressed", 'green'))
+        elif result.get('compressed') == "no":
+            status_labels.append(ircutils.mircColor("Uncompressed", 'red'))
+        
+        # Combine into single status indicator
+        if status_labels:
+            status_parts.append("Status: " + " & ".join(status_labels))
 
+        return " | ".join(status_parts)
+    
     def _format_result(self, result):
         """Format a single search result"""
         name = result.get('release', 'Unknown')
@@ -270,8 +289,12 @@ class SrrDB(callbacks.Plugin):
         unique_results = []
         seen_releases = set()
         
-        # Sort to prioritize confirmed releases
-        results.sort(key=lambda x: (x.get('release', ''), x.get('confirmed') != 'yes'))
+        # Sort to prioritize confirmed releases, then compressed over uncompressed
+        results.sort(key=lambda x: (
+            x.get('release', ''),
+            x.get('confirmed') != 'yes',
+            x.get('compressed') != 'yes'
+        ))
         
         for result in results:
             release_name = result.get('release', '')
