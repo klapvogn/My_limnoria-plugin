@@ -4,19 +4,28 @@ What is SrrDB?
 
 This plugin enables you to search for results on srrdb.com:
 
-`+srr <release name>`
+`AUDIO`
 
-`<release name> | Size: xx GB | Date: xxxx-xx-xx xx:xx:xx | NFO | SRS | SFV | M3U | Status: Unconfirmed`
+`+srrinfo Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES`
 
-`+srrinfo <release name>`
+```
+Release info: Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES | Size: 275.2 MB | Date: 2016-08-05 10:26:18 | SRR | NFO | SFV | M3U | Status: Confirmed
+Download links: SRR: https://www.srrdb.com/download/srr/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES | NFO:
+https://URL/download/file/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES/00-mike_oldfield-five_miles_out-cd-flac-1982-voldies.nfo | SFV:
+https://URL/download/file/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES/00-mike_oldfield-five_miles_out-cd-flac-1982-voldies.sfv | M3U:
+https://URL/download/file/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES/00-mike_oldfield-five_miles_out-cd-flac-1982-voldies.m3u
+```
 
-`<release name> | Size: xx GB | Date: xxxx-xx-xx xx:xx:xx | NFO | SRS | SFV | M3U | Status: Unconfirmed`
-```Download links: SRR: https://URL/download/srr/Twelve.S01E07.1080p.WEB.h264-EDITH | NFO:
-https://www.srrdb.com/download/file/Twelve.S01E07.1080p.WEB.h264-EDITH/twelve.s01e07.1080p.web.h264-edith.nfo | SFV:
-https://URL/download/file/sfv/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES.sfv | M3U:
-https://URL/download/file/m3u/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES.m3u
+`MOVIES`
+
+`+srrinfo Twelve.S01E07.1080p.WEB.h264-EDITH`
+
+```
+Release info: Twelve.S01E07.1080p.WEB.h264-EDITH | Size: 1.7 GB | Date: 2025-09-14 09:17:26 | SRR | NFO | SFV | Status: Unconfirmed
+Download links: SRR: https://www.srrdb.com/download/srr/Twelve.S01E07.1080p.WEB.h264-EDITH | NFO:
+https://URL/download/file/Twelve.S01E07.1080p.WEB.h264-EDITH/twelve.s01e07.1080p.web.h264-edith.nfo | SFV:
+https://URL/download/file/Twelve.S01E07.1080p.WEB.h264-EDITH/twelve.s01e07.1080p.web.h264-edith.sfv
 ```
 
 It added available: SRS, SFV, NFO and M3U to the output
-
 
