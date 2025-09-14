@@ -4,6 +4,8 @@ What is SrrDB?
 
 This plugin enables you to search for results on srrdb.com:
 
+It added available: SRS, SFV, NFO and M3U to the output. It also gives the status for confirmed or compressed also 
+
 ## Audio
 
 `+srr Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES`
@@ -38,6 +40,4 @@ Download links: SRR: https://www.srrdb.com/download/srr/Twelve.S01E07.1080p.WEB.
 https://URL/download/file/Twelve.S01E07.1080p.WEB.h264-EDITH/twelve.s01e07.1080p.web.h264-edith.nfo | SFV:
 https://URL/download/file/Twelve.S01E07.1080p.WEB.h264-EDITH/twelve.s01e07.1080p.web.h264-edith.sfv
 ```
-
-It added available: SRS, SFV, NFO and M3U to the output
 
