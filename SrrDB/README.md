@@ -4,7 +4,7 @@ What is SrrDB?
 
 This plugin enables you to search for results on srrdb.com:
 
-`AUDIO`
+## Audio
 
 `+srrinfo Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES`
 
@@ -16,7 +16,7 @@ https://URL/download/file/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES/00-m
 https://URL/download/file/Mike_Oldfield-Five_Miles_Out-CD-FLAC-1982-VOLDiES/00-mike_oldfield-five_miles_out-cd-flac-1982-voldies.m3u
 ```
 
-`MOVIES`
+## Movies
 
 `+srrinfo Twelve.S01E07.1080p.WEB.h264-EDITH`
 
