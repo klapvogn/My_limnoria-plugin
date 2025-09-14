@@ -36,7 +36,7 @@ import concurrent.futures
 import time
 from functools import lru_cache
 from supybot import utils, plugins, ircutils, callbacks, log, conf
-from supybot.commands import *
+from supybot.commands import wrap, optional
 try:
     from supybot.i18n import PluginInternationalization
     _ = PluginInternationalization('SrrDB')
@@ -132,27 +132,69 @@ class SrrDB(callbacks.Plugin):
         self._clear_old_cache()
         
         # Check cache first
-        if release_name in cache_dict:
-            return cache_dict[release_name]
+        cache_key = f"{release_name}_{file_type}"
+        if cache_key in cache_dict:
+            return cache_dict[cache_key]
         
         try:
-            file_url = f"https://www.srrdb.com/download/file/{file_type}/{release_name}.{file_type}"
+            # SRR files have a different URL pattern (never use 00- prefix)
+            if file_type == 'srr':
+                file_url = f"https://www.srrdb.com/download/srr/{urllib.parse.quote(release_name)}"
+            else:
+                lower_name = release_name.lower()
+                # Check if this is likely an MP3/FLAC release
+                is_audio_release = any(ext in lower_name for ext in ['-mp3', '-flac', '.mp3', '.flac', 'cd1', 'cd2', 'cd3'])
+                
+                if is_audio_release:
+                    file_url = f"https://www.srrdb.com/download/file/{urllib.parse.quote(release_name)}/00-{lower_name}.{file_type}"
+                else:
+                    file_url = f"https://www.srrdb.com/download/file/{urllib.parse.quote(release_name)}/{lower_name}.{file_type}"
+            
             req = urllib.request.Request(file_url)
             req.add_header('User-Agent', 'Limnoria SrrDB Plugin/1.1')
             req.get_method = lambda: 'HEAD'  # Only check headers
             
             with urllib.request.urlopen(req, timeout=3) as response:
                 exists = response.status == 200
-                cache_dict[release_name] = exists
+                cache_dict[cache_key] = exists
                 return exists
         except urllib.error.HTTPError as e:
             exists = e.code != 404
-            cache_dict[release_name] = exists
+            cache_dict[cache_key] = exists
             return exists
         except Exception:
             # Cache negative result for failed checks to avoid repeated attempts
-            cache_dict[release_name] = False
+            cache_dict[cache_key] = False
             return False
+
+    def _get_download_url(self, release_name, file_type):
+        """Get download URL for a specific file type"""
+        # SRR files have a different URL pattern (never use 00- prefix)
+        if file_type == 'srr':
+            return f"https://www.srrdb.com/download/srr/{urllib.parse.quote(release_name)}"
+        
+        lower_name = release_name.lower()
+        
+        # Check if this is likely an MP3/FLAC release (audio)
+        is_audio_release = any(ext in lower_name for ext in ['-mp3', '-flac', '.mp3', '.flac', 'cd1', 'cd2', 'cd3'])
+        
+        if is_audio_release:
+            # For audio releases, use the 00- pattern for NFO/SFV/M3U
+            return f"https://www.srrdb.com/download/file/{urllib.parse.quote(release_name)}/00-{lower_name}.{file_type}"
+        else:
+            # For non-audio releases (TV, movies, etc.), use direct naming
+            return f"https://www.srrdb.com/download/file/{urllib.parse.quote(release_name)}/{lower_name}.{file_type}"
+
+    def _check_m3u_exists(self, release_name):
+        """Check if M3U file exists for a release on srrDB with caching"""
+        # M3U files are typically only available for audio releases
+        lower_name = release_name.lower()
+        is_audio_release = any(ext in lower_name for ext in ['-mp3', '-flac', '.mp3', '.flac', 'cd1', 'cd2', 'cd3'])
+        
+        if not is_audio_release:
+            return False  # M3U files are only for audio releases
+        
+        return self._check_file_exists(release_name, 'm3u', self._m3u_cache)
 
     def _check_sfv_exists(self, release_name):
         """Check if SFV file exists for a release on srrDB with caching"""
@@ -176,19 +218,19 @@ class SrrDB(callbacks.Plugin):
                     return f"{size:.1f} {unit}"
             size /= 1024.0
         return f"{size:.1f} PB"  # Edge case
-
+    
     def _build_status_indicators(self, result, has_sfv, has_m3u):
         """Build status indicator string"""
         status_parts = []
         
         # File availability indicators
+        if result.get('hasSRS') == "yes":
+            status_parts.append(ircutils.mircColor("SRR", 'green'))        
         if result.get('hasNFO') == "yes":
             status_parts.append(ircutils.mircColor("NFO", 'green'))
-        if result.get('hasSRS') == "yes":
-            status_parts.append(ircutils.mircColor("SRS", 'green'))
         if has_sfv:
             status_parts.append(ircutils.mircColor("SFV", 'green'))
-        if has_m3u:
+        if has_m3u:  # Only show M3U if it exists
             status_parts.append(ircutils.mircColor("M3U", 'green'))
 
         # Confirmation status
@@ -213,9 +255,10 @@ class SrrDB(callbacks.Plugin):
         # Format size
         formatted_size = self._format_size(size)
         
-        # Check file existence
-        has_sfv = self._check_sfv_exists(name)
-        has_m3u = self._check_m3u_exists(name)
+        # Check file existence - if NFO exists, SFV exists too
+        has_nfo = result.get('hasNFO') == "yes"
+        has_sfv = has_nfo  # SFV exists if NFO exists
+        has_m3u = self._check_m3u_exists(name)  # M3U needs separate check
         
         # Build status string
         status_text = self._build_status_indicators(result, has_sfv, has_m3u)
@@ -321,20 +364,26 @@ class SrrDB(callbacks.Plugin):
             
             # Provide download links if files exist
             name = exact_match.get('release', '')
+            has_nfo = exact_match.get('hasNFO') == 'yes'
             links = []
-            if exact_match.get('hasNFO') == 'yes':
-                links.append(f"NFO: https://www.srrdb.com/download/file/nfo/{name}.nfo")
+
             if exact_match.get('hasSRS') == 'yes':
-                links.append(f"SRS: https://www.srrdb.com/download/file/srs/{name}.srs")
-            if self._check_sfv_exists(name):
-                links.append(f"SFV: https://www.srrdb.com/download/file/sfv/{name}.sfv")
+                # SRR files have a completely different URL pattern
+                srr_url = f"https://www.srrdb.com/download/srr/{urllib.parse.quote(name)}"
+                links.append(f"SRR: {srr_url}")
+
+            if has_nfo:
+                links.append(f"NFO: {self._get_download_url(name, 'nfo')}")
+                links.append(f"SFV: {self._get_download_url(name, 'sfv')}")
+            
             if self._check_m3u_exists(name):
-                links.append(f"M3U: https://www.srrdb.com/download/file/m3u/{name}.m3u")
+                links.append(f"M3U: {self._get_download_url(name, 'm3u')}")
             
             if links:
                 irc.reply("Download links: " + " | ".join(links))
+            else:
+                irc.reply("No download links available for this release.")
         else:
             irc.reply(f"Exact match not found. Try: srr {release_name}")
-
 
 Class = SrrDB
