@@ -54,6 +54,8 @@ class SrrDB(callbacks.Plugin):
         self.__parent.__init__(irc)
         # Cache for SFV existence checks (release_name -> bool)
         self._sfv_cache = {}
+        # Cache for M3U existence checks (release_name -> bool)
+        self._m3u_cache = {}
         self._cache_timeout = 300  # 5 minutes
         self._last_cache_clear = time.time()
 
@@ -62,6 +64,7 @@ class SrrDB(callbacks.Plugin):
         current_time = time.time()
         if current_time - self._last_cache_clear > self._cache_timeout:
             self._sfv_cache.clear()
+            self._m3u_cache.clear()
             self._last_cache_clear = current_time
 
     @lru_cache(maxsize=128)
@@ -124,32 +127,40 @@ class SrrDB(callbacks.Plugin):
             log.error(f"SrrDB: Unexpected error in search: {e}")
             return None
 
-    def _check_sfv_exists(self, release_name):
-        """Check if SFV file exists for a release on srrDB with caching"""
+    def _check_file_exists(self, release_name, file_type, cache_dict):
+        """Generic function to check if a file exists for a release on srrDB with caching"""
         self._clear_old_cache()
         
         # Check cache first
-        if release_name in self._sfv_cache:
-            return self._sfv_cache[release_name]
+        if release_name in cache_dict:
+            return cache_dict[release_name]
         
         try:
-            sfv_url = f"https://www.srrdb.com/download/file/sfv/{release_name}.sfv"
-            req = urllib.request.Request(sfv_url)
+            file_url = f"https://www.srrdb.com/download/file/{file_type}/{release_name}.{file_type}"
+            req = urllib.request.Request(file_url)
             req.add_header('User-Agent', 'Limnoria SrrDB Plugin/1.1')
             req.get_method = lambda: 'HEAD'  # Only check headers
             
             with urllib.request.urlopen(req, timeout=3) as response:
                 exists = response.status == 200
-                self._sfv_cache[release_name] = exists
+                cache_dict[release_name] = exists
                 return exists
         except urllib.error.HTTPError as e:
             exists = e.code != 404
-            self._sfv_cache[release_name] = exists
+            cache_dict[release_name] = exists
             return exists
         except Exception:
             # Cache negative result for failed checks to avoid repeated attempts
-            self._sfv_cache[release_name] = False
+            cache_dict[release_name] = False
             return False
+
+    def _check_sfv_exists(self, release_name):
+        """Check if SFV file exists for a release on srrDB with caching"""
+        return self._check_file_exists(release_name, 'sfv', self._sfv_cache)
+
+    def _check_m3u_exists(self, release_name):
+        """Check if M3U file exists for a release on srrDB with caching"""
+        return self._check_file_exists(release_name, 'm3u', self._m3u_cache)
 
     def _format_size(self, size):
         """Convert size to human readable format"""
@@ -166,7 +177,7 @@ class SrrDB(callbacks.Plugin):
             size /= 1024.0
         return f"{size:.1f} PB"  # Edge case
 
-    def _build_status_indicators(self, result, has_sfv):
+    def _build_status_indicators(self, result, has_sfv, has_m3u):
         """Build status indicator string"""
         status_parts = []
         
@@ -174,9 +185,11 @@ class SrrDB(callbacks.Plugin):
         if result.get('hasNFO') == "yes":
             status_parts.append(ircutils.mircColor("NFO", 'green'))
         if result.get('hasSRS') == "yes":
-            status_parts.append(ircutils.mircColor("SRS", 'blue'))
+            status_parts.append(ircutils.mircColor("SRS", 'green'))
         if has_sfv:
-            status_parts.append(ircutils.mircColor("SFV", 'purple'))
+            status_parts.append(ircutils.mircColor("SFV", 'green'))
+        if has_m3u:
+            status_parts.append(ircutils.mircColor("M3U", 'green'))
 
         # Confirmation status
         if result.get('confirmed') == "yes":
@@ -200,11 +213,12 @@ class SrrDB(callbacks.Plugin):
         # Format size
         formatted_size = self._format_size(size)
         
-        # Check SFV existence
+        # Check file existence
         has_sfv = self._check_sfv_exists(name)
+        has_m3u = self._check_m3u_exists(name)
         
         # Build status string
-        status_text = self._build_status_indicators(result, has_sfv)
+        status_text = self._build_status_indicators(result, has_sfv, has_m3u)
         
         return f"{ircutils.bold(name)} | Size: {formatted_size} | Date: {date} | {status_text}"
     
@@ -314,6 +328,8 @@ class SrrDB(callbacks.Plugin):
                 links.append(f"SRS: https://www.srrdb.com/download/file/srs/{name}.srs")
             if self._check_sfv_exists(name):
                 links.append(f"SFV: https://www.srrdb.com/download/file/sfv/{name}.sfv")
+            if self._check_m3u_exists(name):
+                links.append(f"M3U: https://www.srrdb.com/download/file/m3u/{name}.m3u")
             
             if links:
                 irc.reply("Download links: " + " | ".join(links))
