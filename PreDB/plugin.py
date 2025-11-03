@@ -713,11 +713,10 @@ class PreDB(callbacks.Plugin):
                         LIMIT 1
                     """, (release,))
                 result = cursor.fetchone()
+                
             if not result:
-                if release != "*":
-                    irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
-                else:
-                    irc.reply("\x0305No releases found.\x03")
+                # Single error message for both cases
+                irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
             # Unpack and process result
@@ -942,7 +941,7 @@ class PreDB(callbacks.Plugin):
 
                 result = cursor.fetchone()
                 if not result or not result[0]:
-                    irc.reply(f"\x0305Nothing found for\x03: {groupname}")
+                    irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                     return
 
                 total, nukes, unnukes, modnukes, first_time, last_time, first_release, last_release = result
@@ -1033,9 +1032,7 @@ class PreDB(callbacks.Plugin):
 
             if not result:
                 if groupname:
-                    irc.reply(f"\x0305No nuked releases found for group\x03: {groupname}")
-                else:
-                    irc.reply("\x0305No nuked releases found.")
+                    irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
             releasename, unixtime, section, reason, nukenet = result
@@ -1125,8 +1122,8 @@ class PreDB(callbacks.Plugin):
                 result = cursor.fetchone()
 
             if not result:
-                msg = f"No unnuked releases found{' for group ' + groupname if groupname else ''}"
-                irc.reply(f"\x0305{msg}\x03")
+                if groupname:
+                    irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
             # Process result
@@ -1222,9 +1219,8 @@ class PreDB(callbacks.Plugin):
                 cursor.execute(query, params)
                 result = cursor.fetchone()
 
-            if not result:
-                msg = f"No modnuke releases found{' for group ' + groupname if groupname else ''}"
-                irc.reply(f"\x0305{msg}\x03")
+                if not result:
+                    irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
             # Process result
@@ -1239,7 +1235,7 @@ class PreDB(callbacks.Plugin):
             pretime_colored = f"{time_color}{pretime_formatted}\x03"
             
             irc.reply(
-                f"[ \x0304MODNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_colored} ] "
+                f"[ \x0305MODNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_colored} ] "
                 f"in [ {section_formatted} ] [ \x0304{reason or 'Unknown reason'}\x03 => \x0304{nukenet or 'Unknown network'}\x03 ]"
             )
             
@@ -1317,7 +1313,7 @@ class PreDB(callbacks.Plugin):
                 results = cursor.fetchall()
 
             if not results:
-                irc.reply(f"\x0305Nothing found that makes me a sad pre bot :-(\x03")
+                irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
             
             # Notify the user about sending results
