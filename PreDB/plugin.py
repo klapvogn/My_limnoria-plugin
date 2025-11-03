@@ -1219,7 +1219,8 @@ class PreDB(callbacks.Plugin):
                 cursor.execute(query, params)
                 result = cursor.fetchone()
 
-                if not result:
+            if not result:
+                if groupname:
                     irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
@@ -1236,7 +1237,7 @@ class PreDB(callbacks.Plugin):
             
             irc.reply(
                 f"[ \x0305MODNUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_colored} ] "
-                f"in [ {section_formatted} ] [ \x0304{reason or 'Unknown reason'}\x03 => \x0304{nukenet or 'Unknown network'}\x03 ]"
+                f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
             )
             
         except Exception as e:
@@ -1391,22 +1392,28 @@ class PreDB(callbacks.Plugin):
     # =======
     # ADDNUKE
     # =======
-    @wrap(['text', 'text', 'text'])
     def handle_addnuke(self, irc, msg, args):
         """Threadpool-based nuke handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
-            
-        if len(args) < 3:
-            irc.reply("Usage: !nuke <releasename> <reason> <nukenet>")
-            return
+        try:
+            if msg.nick not in ["CTW_PRE", "klapvogn"]:
+                return
+                
+            if len(args) < 3:
+                irc.reply("Usage: !nuke <releasename> <reason> <nukenet>")
+                return
 
-        releasename = args[0]
-        reason = ' '.join(args[1:-1])
-        nukenet = args[-1]
-        
-        # Submit to thread pool
-        self.thread_pool.submit(self._nuke_thread, irc, releasename, reason, nukenet)
+            releasename = args[0]
+            reason = ' '.join(args[1:-1])
+            nukenet = args[-1]
+            
+            self.log.debug(f"Parsed - releasename: {releasename}, reason: {reason}, nukenet: {nukenet}")
+            
+            # Submit to thread pool
+            self.thread_pool.submit(self._nuke_thread, irc, releasename, reason, nukenet)
+            
+        except Exception as e:
+            self.log.error(f"Error in handle_addnuke: {e}")
+            irc.reply(f"Error processing nuke command: {e}")
 
     # ==========================================================
     # Add nukes that is not in database to an new_nukes database
@@ -1457,7 +1464,6 @@ class PreDB(callbacks.Plugin):
     # =========
     # ADDUNNUKE
     # =========
-    @wrap(['text', 'text', 'text'])
     def handle_addunnuke(self, irc, msg, args):
         """Threadpool-based unnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
@@ -1523,7 +1529,6 @@ class PreDB(callbacks.Plugin):
     # =======
     # MODNUKE
     # =======
-    @wrap(['text', 'text', 'text'])
     def handle_addmodnuke(self, irc, msg, args):
         """Threadpool-based modnuke handler"""
         if msg.nick not in ["CTW_PRE", "klapvogn"]:
@@ -1660,29 +1665,48 @@ class PreDB(callbacks.Plugin):
     # - In _modnuke_thread: self.announce_nuke_status(irc, releasename, reason, nukenet, 3)
 
     def doPrivmsg(self, irc, msg):
-        """Intercepts private messages to parse `!addpre` and `!info` commands."""
+        """Intercepts private messages to parse various commands."""
         text = msg.args[1]
         if text.startswith("!addpre"):
-            args = text.split()[1:]  # Extract arguments after the command
+            args = text.split()[1:]
+            self.log.debug(f"!addpre args: {args}, length: {len(args)}")
             if len(args) >= 2:
                 self.handle_addpre(irc, msg, args)
+            else:
+                self.log.debug(f"Not enough args for !addpre: {len(args)}")                  
+
         elif text.startswith("!info"):
-            args = text.split()[1:]  # Extract arguments after the command
+            args = text.split()[1:]
+            self.log.debug(f"!info args: {args}, length: {len(args)}")
             if len(args) >= 3:
                 self.handle_addinfo(irc, msg, args)
+            else:
+                self.log.debug(f"Not enough args for !info: {len(args)}")                
+
         elif text.startswith("!nuke"):
-            args = text.split()[1:]  # Extract arguments after the command
+            args = text.split()[1:]
+            self.log.debug(f"!nuke args: {args}, length: {len(args)}")
             if len(args) >= 3:
                 self.handle_addnuke(irc, msg, args)
-        elif text.startswith("!modnuke"):
-            args = text.split()[1:]  # Extract arguments after the command
-            if len(args) >= 3:
-                self.handle_addmodnuke(irc, msg, args)            
-        elif text.startswith("!unnuke"):
-            args = text.split()[1:]  # Extract arguments after the command
-            if len(args) >= 3:
-                self.handle_addunnuke(irc, msg, args)  
+            else:
+                self.log.debug(f"Not enough args for !nuke: {len(args)}")
 
+        elif text.startswith("!modnuke"):
+            args = text.split()[1:]
+            self.log.debug(f"!modnuke args: {args}, length: {len(args)}")
+            if len(args) >= 3:
+                self.handle_addmodnuke(irc, msg, args)
+            else:
+                self.log.debug(f"Not enough args for !modnuke: {len(args)}")                
+                        
+        elif text.startswith("!unnuke"):
+            args = text.split()[1:]
+            self.log.debug(f"!unnuke args: {args}, length: {len(args)}")
+            if len(args) >= 3:
+                self.handle_addunnuke(irc, msg, args)
+            else:
+                self.log.debug(f"Not enough args for !unnuke: {len(args)}")                 
+                    
     # ===================
     # DATABASE STATISTICS
     # ===================
