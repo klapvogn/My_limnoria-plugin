@@ -358,7 +358,46 @@ class PreDB(callbacks.Plugin):
     # TIME FORMATTING
     # ========================
     def format_time_ago(self, timestamp):
-        """Enhanced time difference calculation with years and months"""
+        """
+        Format a timestamp as a human-readable time difference with IRC color coding.
+        
+        Converts a Unix timestamp into a string representing how long ago it occurred,
+        with appropriate IRC color codes based on the age of the timestamp. For older
+        timestamps (over 30 days), provides a detailed breakdown including years,
+        months, days, hours, minutes, and seconds.
+        
+        Parameters
+        ----------
+        timestamp : float
+            Unix timestamp (seconds since epoch) to format as time difference
+            
+        Returns
+        -------
+        tuple
+            A tuple containing:
+            - time_str (str): Human-readable time difference (e.g., "2 days 3 hours ago")
+            - color (str): IRC color code string for the time difference
+            
+        Examples
+        --------
+        >>> format_time_ago(time.time() - 300)  # 5 minutes ago
+        ('5 minutes ago', '\\x0303')
+        
+        >>> format_time_ago(time.time() - 2592000)  # 30 days ago  
+        ('1 month ago', '\\x0313')
+        
+        Notes
+        -----
+        Color coding:
+        - < 1 hour: Green (\\x0303)
+        - < 1 day: Orange (\\x0307) 
+        - < 1 week: Yellow (\\x0308)
+        - < 1 month: Red (\\x0304)
+        - ≥ 1 month: Pink (\\x0313)
+        
+        For periods over 30 days, the output includes all significant time components
+        down to seconds, ensuring precise representation of long time differences.
+        """
         now = time.time()
         diff = int(now - timestamp)
         
@@ -451,8 +490,47 @@ class PreDB(callbacks.Plugin):
     # CHANGE UNIXTIME
     # ===============  
     def unixtime(self, irc, msg, args):
-        """Handles the `+unixtime` command to update the unixtime for a release."""
-
+        """Update the unixtime for a specific release in the database.
+        
+        This command allows authorized users to modify the unixtime timestamp
+        associated with a release entry in the encrypted database.
+        
+        Security:
+            - Only the user 'klapvogn' is authorized to execute this command
+            - All database operations are performed through an encrypted SQLCipher connection
+        
+        Args:
+            irc: IRC connection object for sending replies
+            msg: Message object containing command context and user information
+            args: List of command arguments [releasename, unixtime]
+        
+        Usage:
+            +unixtime <releasename> <unixtime>
+        
+        Examples:
+            +unixtime "My Release Name" 1633046400
+            +unixtime project-alpha 1633132800
+        
+        Validation:
+            - Verifies user authorization
+            - Validates argument count (exactly 2 arguments required)
+            - Ensures unixtime is a valid integer
+        
+        Database Operations:
+            - Updates the 'unixtime' field in the 'releases' table
+            - Uses parameterized queries to prevent SQL injection
+            - Commits transaction only if the update affects exactly one row
+            - Returns appropriate feedback based on whether the release was found
+        
+        Error Handling:
+            - Permission denied for unauthorized users
+            - Invalid argument count or format
+            - Database connection/query errors
+            - Unexpected exceptions with proper logging
+        
+        Returns:
+            None - sends replies directly via IRC connection
+        """
         # Security: Check if the user is 'klapvogn'
         if msg.nick != 'klapvogn':
             irc.reply("Error: You do not have permission to use this command.")
@@ -501,9 +579,43 @@ class PreDB(callbacks.Plugin):
     # CHANGE SECTION
     # ==============  
     def chgsec(self, irc, msg, args):
-        """Handles the `!chgsec` command to update the section for a release.
-
+        """Update the section for a specific release in the database.
+        
+        This command allows authorized users to modify the section assignment
+        for an existing release. The command is restricted to the user 'klapvogn'
+        for security reasons.
+        
         Usage: !chgsec <releasename> <new_section>
+        
+        Args:
+            irc: IRC connection object for sending responses
+            msg: Message object containing command context and sender info
+            args: List of command arguments [releasename, new_section]
+        
+        Security:
+            - Only the user 'klapvogn' is authorized to execute this command
+            - Requires SQLITE_PASSPHRASE environment variable for database access
+        
+        Process:
+            1. Verify user authorization
+            2. Validate argument count
+            3. Retrieve database passphrase from environment
+            4. Update section in encrypted SQLite database
+            5. Provide appropriate success/error feedback
+        
+        Raises:
+            sqlcipher.DatabaseError: If SQLCipher-specific database operations fail
+            sqlite3.Error: If general SQLite database operations fail
+            Exception: For any other unexpected errors
+        
+        Examples:
+            !chgsec "MyRelease v1.0" "stable"
+            !chgsec "TestBuild" "beta"
+        
+        Notes:
+            - All errors are logged for debugging purposes
+            - Database changes are committed only if the update affects rows
+            - The release name must match exactly (case-sensitive)
         """
         # Security: Check if the user is 'klapvogn'
         if msg.nick != 'klapvogn':
