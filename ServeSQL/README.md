@@ -16,8 +16,8 @@ It has the following commands:
 
 ## Database
 ```
-CREATE TABLE IF NOT EXISTS servestats (
-  `id` int NOT NULL,
+CREATE TABLE `servestats` (
+  `id` int NOT NULL AUTO_INCREMENT,
   `nick` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -26,5 +26,18 @@ CREATE TABLE IF NOT EXISTS servestats (
   `total` int DEFAULT '0',
   `channel` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `network` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;              
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Stores service statistics tracking';
+--
+-- Indexes for table `servestats`
+--
+ALTER TABLE `servestats`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `unique_serve` (`nick`,`type`,`channel`,`network`);
+
+
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;         
 ```
+
