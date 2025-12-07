@@ -1,0 +1,40 @@
+--
+-- Database: `serve`
+--
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `servestats`
+--
+
+--
+-- Columns
+-- `type` - Type of service/action being tracked
+-- `last` - Timestamp of last occurrence
+-- `today` - Count for current day
+-- `total` - Lifetime total count
+
+CREATE TABLE `servestats` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `nick` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `last` double DEFAULT NULL,
+  `today` int DEFAULT '0',
+  `total` int DEFAULT '0',
+  `channel` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `network` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Stores service statistics tracking';
+--
+-- Indexes for table `servestats`
+--
+ALTER TABLE `servestats`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `unique_serve` (`nick`,`type`,`channel`,`network`);
+
+
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
