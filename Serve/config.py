@@ -34,7 +34,7 @@ import supybot.registry as registry
 try:
     from supybot.i18n import PluginInternationalization
 
-    _ = PluginInternationalization("Serve")
+    _ = PluginInternationalization("ServeSQL")
 except:
     _ = lambda x: x
 
@@ -46,10 +46,23 @@ def configure(advanced):
     # registry as appropriate.
     from supybot.questions import expect, anything, something, yn
 
-    conf.registerPlugin("Serve", True)
+    conf.registerPlugin("ServeSQL", True)
 
 
-Serve = conf.registerPlugin("Serve")
+ServeSQL = conf.registerPlugin("ServeSQL")
+
+conf.registerChannelValue(
+    ServeSQL,
+    "channel",
+    registry.String(
+        "#bot",
+        _(
+            """
+            Determines what channel the bot will post messages to."
+            """
+        ),
+    ),
+)
 
 
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

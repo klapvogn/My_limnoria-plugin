@@ -1,254 +1,326 @@
-import sqlite3
+import mysql.connector
+from mysql.connector import Error
 import time
-import sqlcipher3 as sqlcipher
 import os
 import threading
 import random
 import pytz
+from dotenv import load_dotenv
 import supybot.world  # Import the supybot world
 import supybot.ircmsgs as ircmsgs  # Import IRC message functions
 from supybot.commands import *
 from supybot import conf
 from datetime import datetime, time as dt_time, timedelta
+from pathlib import Path
 import supybot.callbacks as callbacks
+import sys
 
-class Serve(callbacks.Plugin):
+# Load .env from the plugin directory
+plugin_dir = Path(__file__).parent
+env_path = plugin_dir / '.env'
+load_dotenv(dotenv_path=env_path)
+
+class ServeSQL(callbacks.Plugin):
     def __init__(self, irc):
-        self.__parent = super(Serve, self)
-        self.__parent.__init__(irc)
-        self.passphrase = os.getenv("SQLITE_PASSPHRASE")
-        if not self.passphrase:
-            self.log.error("SQLITE_PASSPHRASE environment variable not set!")
+        super().__init__(irc)
+        
+        # MySQL configuration        
+        self.db_config = {
+        'host': os.getenv("MYSQL_HOST"),
+        'database': os.getenv("MYSQL_DATABASE"),
+        'user': os.getenv("MYSQL_USER"),
+        'password': os.getenv("MYSQL_PASSWORD"),
+        'port': int(os.getenv("MYSQL_PORT", 3306)),  # Keep default for port since it's usually 3306
+        'charset': 'utf8mb4',
+        'collation': 'utf8mb4_unicode_ci'
+    }   
 
-        # Centralize database location using Supybot's directory configuration
-        self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
-        self.init_db()  # Ensure tables exist
-        # Establish and initialize the database if needed persistently
-        self.db = sqlcipher.connect(self.db_path)        
 
-        # Dictionary to track the last command time for each user
+        if not self.db_config['user'] or not self.db_config['password'] or not self.db_config['database']:
+            self.log.error("MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE environment variables must be set!")
+            raise ValueError("MySQL credentials not set")
+               
+        self.response_cache = {}
+        self.cache_expiry = 3600  # 1 hour        
         self.last_command_time = {}
-
-        # Initialize and schedule daily reset
         self.timer = None
-        self.schedule_daily_midnight_reset()       
-
-        # Settings for spam replies and date format
+        self.resetting_lock = threading.Lock()  # Add a lock to prevent concurrent resets
+        self.schedule_daily_midnight_reset()
+        #SPAM
+        self.command_history = {}  # Track command frequency
+        self.history_lock = threading.Lock()  # Thread safety for command history
+        self.last_cleanup = time.time()  # Track last cleanup time        
+        
         self.settings = {
-            "antispam": (1, 3),  # 1 trigger every 3 seconds
+            "antispam": {
+                "cooldown": 3,          # Seconds between commands (original behavior)
+                "burst_limit": 5,       # Max commands per minute (new burst protection)
+                "window_seconds": 60     # Time window for burst limit (new)
+            },
             "spamreplies": [
-                "Hey hey there, don't you think it's going a bit too fast there? Only {since} sec, since your last ...",
-                "I am busy doing something else",
-                "Haven't you just had ?",
-                "remember to breath to",
-                "please pay, before asking for more!",
+                "Hey {nick}, slow down! Only {since}s since your last request. (Limit: {burst_limit}/{window_seconds}s)",
+                "I'm busy right now, try again in {cooldown}s.",
+                "Please wait before asking again. (Recent commands: {recent_count}/{burst_limit})",
+                "Please enjoy your refill before ordering something new!"
             ],
-            "dateformat": "%H:%M:%S",  # Corresponds to 'h:i:s' in PHP
+            "dateformat": "%H:%M:%S"
         }
+        #END
 
-    def add_ordinal_number_suffix(self, num):
-        if not (num % 100 in [11, 12, 13]):
-            if num % 10 == 1:
-                return f"{num}st"
-            elif num % 10 == 2:
-                return f"{num}nd"
-            elif num % 10 == 3:
-                return f"{num}rd"
-        return f"{num}th"
+    def get_cached_response(self, key, generator):
+        now = time.time()
+        if key in self.response_cache:
+            cached_time, response = self.response_cache[key]
+            if now - cached_time < self.cache_expiry:
+                return response
+        response = generator()
+        self.response_cache[key] = (now, response)
+        return response        
 
-    def init_db(self):
-        """Initializes the SQLCipher database with proper schema and indexes."""
-        if not self.passphrase:
-            self.log.error("SQLITE_PASSPHRASE not set.")
+#    def _cleanup_old_entries(self):
+#        """Periodically clean up old entries to prevent memory bloat."""
+#        now = time.time()
+#        if now - self.last_cleanup < 3600:  # Cleanup every hour
+#            return
+        
+#        with self.history_lock:
+#            cutoff = now - 86400  # Keep 24 hours of history
+#            self.command_history = {
+#                nick: data 
+#                for nick, data in self.command_history.items() 
+#                if data['last_time'] > cutoff
+#            }
+#            self.last_cleanup = now
+
+    def _cleanup_old_entries(self):
+        """Periodically clean up old entries to prevent memory bloat."""
+        now = time.time()
+        if now - self.last_cleanup < 3600:  # Cleanup every hour
             return
+        
+        with self.history_lock:
+            cutoff = now - 86400  # Keep 24 hours of history
+            for nick in list(self.command_history.keys()):
+                if self.command_history[nick]['last_time'] < cutoff:
+                    del self.command_history[nick]
+            self.last_cleanup = now
+        
+    @staticmethod
+    def add_ordinal_number_suffix(num: int) -> str:
+        """Add ordinal suffix to a number (1st, 2nd, 3rd, etc.).
+        
+        Args:
+            num: The number to convert to ordinal
+            
+        Returns:
+            str: The number with ordinal suffix
+            
+        Examples:
+            >>> add_ordinal_number_suffix(1)
+            '1st'
+            >>> add_ordinal_number_suffix(22)
+            '22nd'
+        """
+        if 10 <= num % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(num % 10, "th")
+        return f"{num}{suffix}"
+    
+    def _get_connection(self):
+        """Get MySQL database connection."""
         try:
-            with sqlcipher.connect(self.db_path) as db_conn:
-                db_conn.execute(f"PRAGMA key = '{self.passphrase}';")
-                db_conn.execute('''
-                    CREATE TABLE IF NOT EXISTS servestats (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        nick TEXT,
-                        address TEXT,
-                        type TEXT,
-                        last REAL,
-                        today INTEGER,
-                        total INTEGER,
-                        channel TEXT,
-                        network TEXT,
-                        UNIQUE(nick, type, channel, network)
-                    )''')
-                db_conn.execute('''
-                    CREATE INDEX IF NOT EXISTS idx_servestats_main 
-                    ON servestats(nick, type, channel, network)
-                ''')
-                db_conn.commit()
+            conn = mysql.connector.connect(**self.db_config)
+            return conn
+        except Error as e:
+            self.log.error(f"Database connection error: {str(e)}")
+            raise
         except Exception as e:
-            self.log.error(f"Error initializing database: {str(e)}")           
+            self.log.error(f"Unexpected connection error: {str(e)}")
+            raise
 
+        # Scheduler improvements
     def schedule_daily_midnight_reset(self):
         try:
-            local_tz = pytz.timezone('Europe/Copenhagen')  # Set your local timezone
-            now = datetime.now(local_tz)
-            midnight_time = local_tz.localize(datetime.combine(now.date(), dt_time(0, 0)))
+            tz = pytz.timezone('Europe/Copenhagen')
+            now = datetime.now(tz)
+            # Always schedule for the *next* midnight
+            next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+            delay = (next_midnight - now).total_seconds()
+            self.log.info(f"Scheduled reset in: {delay:.2f} seconds")
 
-            # Schedule for the next midnight if we're already past today's midnight
-            if now >= midnight_time:
-                midnight_time += timedelta(days=1)
+            # Cancel any existing timer before creating a new one
+            if hasattr(self, 'timer') and self.timer:
+                self.timer.cancel()
 
-            seconds_until_midnight = (midnight_time - now).total_seconds()
-            self.log.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}, Next reset at: {midnight_time.strftime('%Y-%m-%d %H:%M:%S')}, "
-                          f"Seconds until reset: {seconds_until_midnight:.2f}")
-
-            # Schedule the reset task
-            self.timer = threading.Timer(seconds_until_midnight, self.reset_today_stats)
+            self.timer = threading.Timer(delay, self.reset_today_stats)
+            self.timer.daemon = True  # Make it a daemon thread so it doesn't block shutdown
             self.timer.start()
         except Exception as e:
-            self.log.error(f"Error occurred while scheduling daily reset: {str(e)}")            
+            self.log.error(f"Scheduling error: {str(e)}")    
 
     def reset_today_stats(self):
-        """Initializes the SQLCipher database for storing release information."""
-        passphrase = os.getenv("SQLITE_PASSPHRASE")
-        if not passphrase:
-            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
-            return        
+        if not self.resetting_lock.acquire(blocking=False):
+            self.log.info("Reset already in progress. Skipping.")
+            return
+        
         try:
             self.log.info("Resetting 'today' stats.")
-            # Open a new connection within the method
-            with sqlcipher.connect(self.db_path) as db_conn:
-                db_conn.execute(f"PRAGMA key = '{passphrase}';")
-                db_conn.execute('''UPDATE servestats SET today = 0''')
-                db_conn.commit()
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE serve.servestats SET today = 0')
+            conn.commit()
+            cursor.close()
+            conn.close()
             self.log.info("Stats reset successfully.")
             self.post_reset_message()
         except Exception as e:
-            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
+            self.log.error(f"Error resetting stats: {str(e)}")
         finally:
-            # Reschedule the reset for the next midnight
             self.schedule_daily_midnight_reset()
+            self.resetting_lock.release()
 
     def post_reset_message(self):
         try:
-            # Create a message to post to the channel
-            channel = "#bot"  # Specify the channel
+            channel = "#bot"
             message = "Daily stats have been reset to 0!"
-
-            # Log the message posting event
+            
+            # Only proceed if we haven't posted this message recently
+            if getattr(self, '_last_reset_posted', None) == datetime.now().date():
+                return
+                
             self.log.info(f"Posting reset message to channel {channel}: {message}")
 
-            # Iterate over all IRC networks
-            for irc in supybot.world.ircs:  # Assuming ircs is a list of IRC objects
-                if irc.network == "omg":  # Replace "network" with the correct attribute
-                    # Queue the message to the channel
+            # Find the first matching IRC network and send message
+            for irc in supybot.world.ircs:
+                if irc.network.lower() == "omg":  # Case-insensitive comparison
                     irc.queueMsg(ircmsgs.privmsg(channel, message))
-                    break  # Exit loop once the message is sent to the desired network
+                    self._last_reset_posted = datetime.now().date()  # Track when we last posted
+                    break  # Only send once
         except Exception as e:
-            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")                
+            self.log.error(f"Error occurred while posting reset message: {str(e)}")     
 
     def die(self):
-        self.__parent.die()
-        if self.timer is not None and self.timer.is_alive():
+        """Clean shutdown with proper resource cleanup."""
+        if self.timer and self.timer.is_alive():
             self.timer.cancel()
             self.log.info("Scheduled timer cancelled.")
-        self.log.info("Plugin shutdown and resources cleaned up.")      
+        self.log.info("Plugin shutdown and resources cleaned up.")             
+        super().die()    
 
     def _get_stats(self, nick, drink_type, channel, network):
-        """Retrieves stats from the SQLCipher database."""
-        passphrase = os.getenv("SQLITE_PASSPHRASE")
-        if not passphrase:
-            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
-            return 0, 0  # Return default values if no passphrase
-
+        """Retrieves stats from the MySQL database."""
         try:
-            today = int(time.strftime('%Y%m%d'))
-            # Connect to the database using SQLCipher
-            with sqlcipher.connect(self.db_path) as db_conn:
-                db_conn.execute(f"PRAGMA key = '{passphrase}';")  # Set the encryption key
-                cursor = db_conn.cursor()  # Make sure you're using the correct connection object
-
-                # Fetch the sum of total and today
-                cursor.execute('''SELECT total, today
-                                FROM servestats
-                                WHERE network = ? AND type = ? AND nick = ? AND channel = ?''',
-                            (network, drink_type, nick, channel))
-
-                result = cursor.fetchone()
-                if result and all(value is not None for value in result):
-                    total, today = result
-                else:
-                    total, today = 0, 0  # Set defaults if no data is found
-
-                return today, total
-
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''SELECT total, today
+                            FROM serve.servestats
+                            WHERE network = %s AND type = %s AND nick = %s AND channel = %s''',
+                        (network, drink_type, nick, channel))
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if result and all(value is not None for value in result):
+                total, today = result
+            else:
+                total, today = 0, 0
+            
+            return today, total
+        except Error as e:
+            self.log.error(f"Error occurred while getting stats: {str(e)}")
+            return 0, 0
         except Exception as e:
-            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
-            return 0, 0  # Return default values in case of error    
-
+            self.log.error(f"Unexpected error in _get_stats: {str(e)}")
+            return 0, 0    
 
     def _update_stats(self, nick, address, drink_type, channel, network):
-        """Updates stats using an efficient UPSERT operation."""
-        if not self.passphrase:
-            return 0, 0
+        """Efficient UPSERT operation with parameterized queries."""
         try:
-            current_time = time.time()
-            with sqlcipher.connect(self.db_path) as db_conn:
-                db_conn.execute(f"PRAGMA key = '{self.passphrase}';")
-                cursor = db_conn.cursor()
-                # UPSERT to handle insert or update in one operation
-                cursor.execute('''
-                    INSERT INTO servestats (nick, address, type, last, today, total, channel, network)
-                    VALUES (?, ?, ?, ?, 1, 1, ?, ?)
-                    ON CONFLICT(nick, type, channel, network) DO UPDATE SET
-                        today = today + 1,
-                        total = total + 1,
-                        last = excluded.last,
-                        address = excluded.address
-                ''', (nick, address, drink_type, current_time, channel, network))
-                db_conn.commit()
-                # Retrieve updated counts
-                cursor.execute('''
-                    SELECT today, total FROM servestats
-                    WHERE nick=? AND type=? AND channel=? AND network=?
-                ''', (nick, drink_type, channel, network))
-                today_count, total_count = cursor.fetchone() or (1, 1)
-                return today_count, total_count
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO serve.servestats 
+                (nick, address, type, last, today, total, channel, network)
+                VALUES (%s, %s, %s, %s, 1, 1, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    today = today + 1,
+                    total = total + 1,
+                    last = %s,
+                    address = %s
+            ''', (nick, address, drink_type, time.time(), channel, network, time.time(), address))
+            conn.commit()
+            
+            cursor.execute('''
+                SELECT today, total FROM serve.servestats
+                WHERE nick=%s AND type=%s AND channel=%s AND network=%s
+            ''', (nick, drink_type, channel, network))
+            result = cursor.fetchone() or (1, 1)
+            cursor.close()
+            conn.close()
+            return result
+        except Error as e:
+            self.log.error(f"Database error in _update_stats: {str(e)}")
+            return 0, 0
         except Exception as e:
-            self.log.error(f"Failed to update stats: {str(e)}")
-            return 0, 0     
-
-    def _select_spam_reply(self, last_served_time):
-        """Select a spam reply if the user requests drinks too quickly."""
-        time_since_last = time.time() - last_served_time
-        # Convert the time since last command to seconds
-        formatted_time = int(time_since_last)  # Get the time in seconds
-        reply = random.choice(self.settings["spamreplies"])
-        return reply.format(since=formatted_time)
-
-    def _is_spamming(self, nick):
-        """Check if the user is spamming commands too quickly."""
-        current_time = time.time()
-        last_time = self.last_command_time.get(nick, 0)
-
-        # Get the antispam configuration
-        _, seconds = self.settings["antispam"]  # We no longer need 'triggers'
-
-        # Calculate the threshold in seconds
-        threshold = seconds
-
-        # Check the time difference based on the antispam settings
-        if current_time - last_time < threshold:  # Allow one command every 'seconds'
-            return True
-        
-        self.last_command_time[nick] = current_time  # Update the last command time
-        return False
+            self.log.error(f"Unexpected error in _update_stats: {str(e)}")
+            return 0, 0
 
     def handle_spam(self, nick, irc):
-        """Check if a user is spamming commands and reply if so."""
         if self._is_spamming(nick):
-            last_served_time = self.last_command_time[nick]
-            response = self._select_spam_reply(last_served_time)
+            with self.history_lock:
+                history = self.command_history.get(nick, {'timestamps': []})
+                recent_count = len(history['timestamps'])
+                last_time = history['timestamps'][-1] if history['timestamps'] else 0
+                
+            response = random.choice(self.settings["spamreplies"]).format(
+                nick=nick,
+                since=int(time.time() - last_time),
+                cooldown=self.settings["antispam"]["cooldown"],
+                burst_limit=self.settings["antispam"]["burst_limit"],
+                window_seconds=self.settings["antispam"]["window_seconds"],
+                recent_count=recent_count
+            )
             irc.reply(response)
-            return True  # Indicate that the user is spamming
-        return False  # No spam detected        
+            return True
+        return False
+
+    def _is_spamming(self, nick):
+        """Enhanced spam detection with:
+        - Rate limiting (commands per minute)
+        - Cooldown between commands
+        - Automatic cleanup of old data
+        """
+        current_time = time.time()
+        
+        with self.history_lock:
+            # Initialize if new user
+            if nick not in self.command_history:
+                self.command_history[nick] = {'timestamps': []}
+            
+            history = self.command_history[nick]
+            
+            # Remove entries older than our detection window
+            window = self.settings["antispam"]["window_seconds"]
+            history['timestamps'] = [
+                t for t in history['timestamps'] 
+                if current_time - t < window
+            ]
+            
+            # Check burst limit
+            if len(history['timestamps']) >= self.settings["antispam"]["burst_limit"]:
+                return True
+            
+            # Check individual command cooldown
+            cooldown = self.settings["antispam"]["cooldown"]
+            if history['timestamps'] and current_time - history['timestamps'][-1] < cooldown:
+                return True
+            
+            # Record this command
+            history['timestamps'].append(current_time)
+            return False 
+
 # BAR MENU
     @wrap([optional('channel')])
     def bar(self, irc, msg, args, channel):
@@ -322,6 +394,7 @@ class Serve(callbacks.Plugin):
     @wrap([optional('channel')])
     def ganja(self, irc, msg, args, channel):
         """+ganja - hands some ganja."""
+      
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -347,7 +420,8 @@ class Serve(callbacks.Plugin):
 
         # Select a random response
         response = random.choice(responses)
-        irc.reply(response)        
+        irc.reply(response)      
+           
 # END
 
 # Ganja
@@ -425,7 +499,7 @@ class Serve(callbacks.Plugin):
             f"if only you could actually drink pixels... ({today_count}/{total_count})",
             f"here's your cola virtually hands you an empty can—oops, guess I drank it! {nick} ({today_count}/{total_count})",
             f"cola? On the house! Well, technically in your head. {nick} ({today_count}/{total_count})",
-            f"one virtual cola, served with a side of 'don't spill it on your keyboard! ({today_count}/{total_count})",
+            f"one virtual cola, served with a side of don't spill it on your keyboard! ({today_count}/{total_count})",
         ]
 
         # Handle the case of nickname or not, to adjust the {to_nick} part
@@ -837,7 +911,7 @@ class Serve(callbacks.Plugin):
 
     @wrap([optional('channel')])
     def gumbo(self, irc, msg, args, channel):
-        """+coffee - Make a coffee."""
+        """+gumbo - Make a gumbo."""
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -1090,17 +1164,17 @@ class Serve(callbacks.Plugin):
         today_count, total_count = self._update_stats(nick, address, "tequila", channel, network)
 
         responses = [
-            f"hands over a crisp and smooth shot of silver tequila to {nick} – enjoy the bright, zesty kick! ({today_count}/{total_count})"
-            f"slides a frosty glass of tequila sunrise to {nick} – savor the perfect mix of sweet and tangy! ({today_count}/{total_count})"
-            f"serves a refreshing margarita, with a splash of tequila, to {nick} – take a sip and unwind! ({today_count}/{total_count})"
-            f"hands over a bold reposado tequila to {nick} – enjoy the smooth notes of oak and vanilla! ({today_count}/{total_count})"
-            f"slides a tropical tequila punch to {nick} – let the island vibes take over! ({today_count}/{total_count})"
-            f"serves a vibrant paloma, spiked with tequila, to {nick} – feel the citrusy burst of grapefruit and lime! ({today_count}/{total_count})"
-            f"delivers a classic tequila shot with lime and salt to {nick} – indulge in the timeless ritual! ({today_count}/{total_count})"
-            f"offers a rare añejo tequila to {nick} – experience the rich blend of aged flavors! ({today_count}/{total_count})"
-            f"hands a mysterious tequila mezcal cocktail to {nick} – uncover the smoky surprise in every sip! ({today_count}/{total_count})"
-            f"slides a juicy watermelon tequila cooler to {nick} – take a refreshing sip of fruity sweetness! ({today_count}/{total_count})"
-            f"serves a tangy tequila smash to {nick} – enjoy the bold fusion of herbs and citrus! ({today_count}/{total_count})"
+            f"hands over a crisp and smooth shot of silver tequila to {nick} – enjoy the bright, zesty kick! ({today_count}/{total_count})",
+            f"slides a frosty glass of tequila sunrise to {nick} – savor the perfect mix of sweet and tangy! ({today_count}/{total_count})",
+            f"serves a refreshing margarita, with a splash of tequila, to {nick} – take a sip and unwind! ({today_count}/{total_count})",
+            f"hands over a bold reposado tequila to {nick} – enjoy the smooth notes of oak and vanilla! ({today_count}/{total_count})",
+            f"slides a tropical tequila punch to {nick} – let the island vibes take over! ({today_count}/{total_count})",
+            f"serves a vibrant paloma, spiked with tequila, to {nick} – feel the citrusy burst of grapefruit and lime! ({today_count}/{total_count})",
+            f"delivers a classic tequila shot with lime and salt to {nick} – indulge in the timeless ritual! ({today_count}/{total_count})",
+            f"offers a rare añejo tequila to {nick} – experience the rich blend of aged flavors! ({today_count}/{total_count})",
+            f"hands a mysterious tequila mezcal cocktail to {nick} – uncover the smoky surprise in every sip! ({today_count}/{total_count})",
+            f"slides a juicy watermelon tequila cooler to {nick} – take a refreshing sip of fruity sweetness! ({today_count}/{total_count})",
+            f"serves a tangy tequila smash to {nick} – enjoy the bold fusion of herbs and citrus! ({today_count}/{total_count})",
        
             # Additional response variations can be added here
         ]
@@ -1109,4 +1183,4 @@ class Serve(callbacks.Plugin):
         response = random.choice(responses)
         irc.reply(response)               
 
-Class = Serve
+Class = ServeSQL
