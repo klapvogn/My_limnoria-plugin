@@ -34,7 +34,7 @@ import supybot.registry as registry
 try:
     from supybot.i18n import PluginInternationalization
 
-    _ = PluginInternationalization("ServeSQL")
+    _ = PluginInternationalization("Serve")
 except:
     _ = lambda x: x
 
@@ -46,13 +46,13 @@ def configure(advanced):
     # registry as appropriate.
     from supybot.questions import expect, anything, something, yn
 
-    conf.registerPlugin("ServeSQL", True)
+    conf.registerPlugin("Serve", True)
 
 
-ServeSQL = conf.registerPlugin("ServeSQL")
+Serve = conf.registerPlugin("Serve")
 
 conf.registerChannelValue(
-    ServeSQL,
+    Serve,
     "channel",
     registry.String(
         "#bot",

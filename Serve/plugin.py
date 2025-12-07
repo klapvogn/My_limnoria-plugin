@@ -1,45 +1,36 @@
-import mysql.connector
-from mysql.connector import Error
+import sqlite3
 import time
+import sqlcipher3 as sqlcipher
 import os
 import threading
 import random
 import pytz
-from dotenv import load_dotenv
 import supybot.world  # Import the supybot world
 import supybot.ircmsgs as ircmsgs  # Import IRC message functions
 from supybot.commands import *
 from supybot import conf
 from datetime import datetime, time as dt_time, timedelta
-from pathlib import Path
 import supybot.callbacks as callbacks
-import sys
 
-# Load .env from the plugin directory
-plugin_dir = Path(__file__).parent
-env_path = plugin_dir / '.env'
-load_dotenv(dotenv_path=env_path)
+try:
+    from supybot.i18n import PluginInternationalization
 
-class ServeSQL(callbacks.Plugin):
+    _ = PluginInternationalization("OMG")
+except ImportError:
+    _ = lambda x: x
+
+
+class Serve(callbacks.Plugin):
     def __init__(self, irc):
         super().__init__(irc)
+        self.passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not self.passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable not set!")
+            raise ValueError("SQLITE_PASSPHRASE not set")
+
+        self.db_path = conf.supybot.directories.data.dirize("Serve/servestats.db")
+        self.init_db()
         
-        # MySQL configuration        
-        self.db_config = {
-        'host': os.getenv("MYSQL_HOST"),
-        'database': os.getenv("MYSQL_DATABASE"),
-        'user': os.getenv("MYSQL_USER"),
-        'password': os.getenv("MYSQL_PASSWORD"),
-        'port': int(os.getenv("MYSQL_PORT", 3306)),  # Keep default for port since it's usually 3306
-        'charset': 'utf8mb4',
-        'collation': 'utf8mb4_unicode_ci'
-    }   
-
-
-        if not self.db_config['user'] or not self.db_config['password'] or not self.db_config['database']:
-            self.log.error("MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE environment variables must be set!")
-            raise ValueError("MySQL credentials not set")
-               
         self.response_cache = {}
         self.cache_expiry = 3600  # 1 hour        
         self.last_command_time = {}
@@ -127,17 +118,56 @@ class ServeSQL(callbacks.Plugin):
             suffix = {1: "st", 2: "nd", 3: "rd"}.get(num % 10, "th")
         return f"{num}{suffix}"
     
-    def _get_connection(self):
-        """Get MySQL database connection."""
+    # secure connection to the database
+    def _get_secure_connection(self):
+        """Get encrypted database connection."""
         try:
-            conn = mysql.connector.connect(**self.db_config)
+            conn = sqlcipher.connect(self.db_path)
+            conn.execute(f"PRAGMA key = '{self.passphrase}';")
+            conn.execute("PRAGMA journal_mode = WAL")  # Better performance
+            conn.execute("PRAGMA synchronous = NORMAL") 
             return conn
-        except Error as e:
+        except sqlcipher.OperationalError as e:
             self.log.error(f"Database connection error: {str(e)}")
             raise
         except Exception as e:
             self.log.error(f"Unexpected connection error: {str(e)}")
             raise
+
+    # Database operations
+    def init_db(self):
+        """Initialize database with secure connection."""
+        try:
+            with self._get_secure_connection() as conn:
+                # Create tables
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS servestats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nick TEXT,
+                        address TEXT,
+                        type TEXT,
+                        last REAL,
+                        today INTEGER DEFAULT 0,
+                        total INTEGER DEFAULT 0,
+                        channel TEXT,
+                        network TEXT,
+                        UNIQUE(nick, type, channel, network)
+                    )''')
+                # Create index
+                conn.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_servestats_main 
+                    ON servestats(nick, type, channel, network)
+                ''')
+                conn.commit()
+        except sqlcipher.OperationalError as e:
+            self.log.error(f"Operational error initializing database: {str(e)}")
+            raise
+        except sqlcipher.DatabaseError as e:
+            self.log.error(f"General database error: {str(e)}")
+            raise
+        except Exception as e:
+            self.log.error(f"Unexpected error initializing database: {str(e)}")
+            raise    
 
         # Scheduler improvements
     def schedule_daily_midnight_reset(self):
@@ -161,23 +191,22 @@ class ServeSQL(callbacks.Plugin):
             self.log.error(f"Scheduling error: {str(e)}")    
 
     def reset_today_stats(self):
+        # Use lock context manager for better safety
         if not self.resetting_lock.acquire(blocking=False):
             self.log.info("Reset already in progress. Skipping.")
             return
         
         try:
             self.log.info("Resetting 'today' stats.")
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute('UPDATE serve.servestats SET today = 0')
-            conn.commit()
-            cursor.close()
-            conn.close()
+            with self._get_secure_connection() as db_conn:
+                db_conn.execute('''UPDATE servestats SET today = 0''')
+                db_conn.commit()
             self.log.info("Stats reset successfully.")
             self.post_reset_message()
         except Exception as e:
             self.log.error(f"Error resetting stats: {str(e)}")
         finally:
+            # Ensure these always run
             self.schedule_daily_midnight_reset()
             self.resetting_lock.release()
 
@@ -210,57 +239,61 @@ class ServeSQL(callbacks.Plugin):
         super().die()    
 
     def _get_stats(self, nick, drink_type, channel, network):
-        """Retrieves stats from the MySQL database."""
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''SELECT total, today
-                            FROM serve.servestats
-                            WHERE network = %s AND type = %s AND nick = %s AND channel = %s''',
-                        (network, drink_type, nick, channel))
-            result = cursor.fetchone()
-            cursor.close()
-            conn.close()
-            
-            if result and all(value is not None for value in result):
-                total, today = result
-            else:
-                total, today = 0, 0
-            
-            return today, total
-        except Error as e:
-            self.log.error(f"Error occurred while getting stats: {str(e)}")
-            return 0, 0
-        except Exception as e:
-            self.log.error(f"Unexpected error in _get_stats: {str(e)}")
-            return 0, 0    
+        """Retrieves stats from the SQLCipher database."""
+        passphrase = os.getenv("SQLITE_PASSPHRASE")
+        if not passphrase:
+            self.log.error("SQLITE_PASSPHRASE environment variable is not set.")
+            return 0, 0  # Return default values if no passphrase
 
+        try:
+            today = int(time.strftime('%Y%m%d'))
+            # Connect to the database using SQLCipher
+            with sqlcipher.connect(self.db_path) as db_conn:
+                db_conn.execute(f"PRAGMA key = '{passphrase}';")  # Set the encryption key
+                cursor = db_conn.cursor()  # Make sure you're using the correct connection object
+
+                # Fetch the sum of total and today
+                cursor.execute('''SELECT total, today
+                                FROM servestats
+                                WHERE network = ? AND type = ? AND nick = ? AND channel = ?''',
+                            (network, drink_type, nick, channel))
+
+                result = cursor.fetchone()
+                if result and all(value is not None for value in result):
+                    total, today = result
+                else:
+                    total, today = 0, 0  # Set defaults if no data is found
+
+                return today, total
+
+        except Exception as e:
+            self.log.error(f"Error occurred while resetting 'today' stats: {str(e)}")
+            return 0, 0  # Return default values in case of error    
+
+    # Stats handling
     def _update_stats(self, nick, address, drink_type, channel, network):
         """Efficient UPSERT operation with parameterized queries."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
+            with self._get_secure_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO servestats 
+                    (nick, address, type, last, today, total, channel, network)
+                    VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+                    ON CONFLICT(nick, type, channel, network) DO UPDATE SET
+                        today = today + 1,
+                        total = total + 1,
+                        last = excluded.last,
+                        address = excluded.address
+                ''', (nick, address, drink_type, time.time(), channel, network))
+                conn.commit()
+                
             cursor.execute('''
-                INSERT INTO serve.servestats 
-                (nick, address, type, last, today, total, channel, network)
-                VALUES (%s, %s, %s, %s, 1, 1, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    today = today + 1,
-                    total = total + 1,
-                    last = %s,
-                    address = %s
-            ''', (nick, address, drink_type, time.time(), channel, network, time.time(), address))
-            conn.commit()
-            
-            cursor.execute('''
-                SELECT today, total FROM serve.servestats
-                WHERE nick=%s AND type=%s AND channel=%s AND network=%s
+                SELECT today, total FROM servestats
+                WHERE nick=? AND type=? AND channel=? AND network=?
             ''', (nick, drink_type, channel, network))
-            result = cursor.fetchone() or (1, 1)
-            cursor.close()
-            conn.close()
-            return result
-        except Error as e:
+            return cursor.fetchone() or (1, 1)
+        except sqlcipher.Error as e:
             self.log.error(f"Database error in _update_stats: {str(e)}")
             return 0, 0
         except Exception as e:
@@ -911,7 +944,7 @@ class ServeSQL(callbacks.Plugin):
 
     @wrap([optional('channel')])
     def gumbo(self, irc, msg, args, channel):
-        """+gumbo - Make a gumbo."""
+        """+coffee - Make a coffee."""
         nick = msg.nick
         address = msg.prefix
         network = irc.network
@@ -1183,4 +1216,4 @@ class ServeSQL(callbacks.Plugin):
         response = random.choice(responses)
         irc.reply(response)               
 
-Class = ServeSQL
+Class = Serve

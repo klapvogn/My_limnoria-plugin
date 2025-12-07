@@ -17,14 +17,14 @@ It has the following commands:
 ## Database
 ```
 CREATE TABLE IF NOT EXISTS servestats (
-  `id` int NOT NULL,
-  `nick` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `last` double DEFAULT NULL,
-  `today` int DEFAULT '0',
-  `total` int DEFAULT '0',
-  `channel` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `network` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;              
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nick TEXT NOT NULL,
+                address TEXT NOT NULL,
+                type TEXT NOT NULL,
+                last REAL NOT NULL,
+                today INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                network TEXT NOT NULL
+);                
 ```
