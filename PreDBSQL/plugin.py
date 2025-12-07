@@ -1,15 +1,12 @@
 import mysql.connector
 from mysql.connector import Error
 import time
+import queue
 import threading
 import json
 from dotenv import load_dotenv
-import psutil
 import os
 import requests
-import re
-import time
-import traceback
 import supybot.callbacks as callbacks
 import supybot.ircmsgs as ircmsgs
 import supybot.commands as commands
@@ -21,10 +18,16 @@ from supybot.commands import wrap, optional
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from collections import OrderedDict
-from difflib import SequenceMatcher
+from pathlib import Path
+#import psutil
+#import re
+#import traceback
+#from difflib import SequenceMatcher
 
-# Load environment variables from .env file
-load_dotenv()
+# Load .env from the plugin directory
+plugin_dir = Path(__file__).parent
+env_path = plugin_dir / '.env'
+load_dotenv(dotenv_path=env_path)
 
 class PreDBSQL(callbacks.Plugin):
     """Tracks pre database entries and announces them."""
@@ -42,6 +45,7 @@ class PreDBSQL(callbacks.Plugin):
         "MP3": "\00310MP3\003",
         "MP3-WEB": "\00310MP3-WEB\003",
         "FLAC": "\00310FLAC\003",
+        "FLAC-WEB": "\00310FLAC\003",
         "FLACFR": "\00310FLAC-FR\003",
         "ABOOK": "\00310ABOOK\003",
         "MVID": "\00310MVID\003",        
@@ -97,39 +101,40 @@ class PreDBSQL(callbacks.Plugin):
         "DVDR": "\0035DVDR\003",
         "DVDR-DE": "\0035DVDR-DE\003", 
 # X264
-        "X264-UHD": "\00311X264-UHD\003",   
-        "X264-UHD-NL": "\00311X264-UHD-NL\003",
-        "X264-UHD-IT": "\00311X264-UHD-IT\003",  
-        "X264-UHD-PL": "\00311X264-UHD-PL\003",
-        "X264-UHD-FR": "\00311X264-UHD-FR\003",
-        "X264-UHD-DE": "\00311X264-UHD-DE\003",
-        "X264-UHD-CZ": "\00311X264-UHD-CZ\003",
-        "X264-UHD-ES": "\00311X264-UHD-ES\003",        
-        "X264-UHD-SP": "\00311X264-UHD-SP\003",
-         "X264-UHD-NORDiC": "\00311X264-UHD-NORDiC\003",  
+        "X264-UHD": "\00302X264-UHD\003",   
+        "X264-UHD-NL": "\00302X264-UHD-NL\003",
+        "X264-UHD-IT": "\00302X264-UHD-IT\003",  
+        "X264-UHD-PL": "\00302X264-UHD-PL\003",
+        "X264-UHD-FR": "\00302X264-UHD-FR\003",
+        "X264-UHD-DE": "\00302X264-UHD-DE\003",
+        "X264-UHD-CZ": "\00302X264-UHD-CZ\003",
+        "X264-UHD-ES": "\00302X264-UHD-ES\003",        
+        "X264-UHD-SP": "\00302X264-UHD-SP\003",
+        "X264-UHD-NORDiC": "\00302X264-UHD-NORDiC\003",  
 
-        "X264": "\00311X264\003",
-        "X264-SD": "\00311X264-SD\003",        
-        "X264-HD": "\00311X264-HD\003",
-        "X264-HD-NL": "\00311X264-HD-NL\003",
-        "X264-HD-IT": "\00311X264-HD-IT\003",
-        "X264-HD-PL": "\00311X264-HD-PL\003",
-        "X264-HD-FR": "\00311X264-HD-FR\003",
-        "X264-HD-DE": "\00311X264-HD-DE\003",
-        "X264-HD-CZ": "\00311X264-HD-CZ\003",
-        "X264-HD-ES": "\00311X264-HD-ES\003",
-        "X264-HD-SP": "\00311X264-HD-SP\003",  
-        "X264-HD-NORDiC": "\00311X264-HD-NORDiC\003",
+        "X264": "\00302X264\003",
+        "X264-SD": "\00302X264-SD\003",        
+        "X264-HD": "\00302X264-HD\003",
+        "X264-HD-NL": "\00302X264-HD-NL\003",
+        "X264-HD-IT": "\00302X264-HD-IT\003",
+        "X264-HD-PL": "\00302X264-HD-PL\003",
+        "X264-HD-FR": "\00302X264-HD-FR\003",
+        "X264-HD-DE": "\00302X264-HD-DE\003",
+        "X264-HD-CZ": "\00302X264-HD-CZ\003",
+        "X264-HD-ES": "\00302X264-HD-ES\003",
+        "X264-HD-SP": "\00302X264-HD-SP\003",  
+        "X264-HD-NORDiC": "\00302X264-HD-NORDiC\003",
 
-        "X264-SD-NL": "\00311X264-SD-NL\003",
-        "X264-SD-IT": "\00311X264-SD-IT\003",
-        "X264-SD-PL": "\00311X264-SD-PL\003",
-        "X264-SD-FR": "\00311X264-SD-FR\003",     
-        "X264-SD-DE": "\00311X264-SD-DE\003",
-        "X264-SD-CZ": "\00311X264-SD-CZ\003",
-        "X264-SD-ES": "\00311X264-SD-ES\003",
+        "X264-SD-NL": "\00302X264-SD-NL\003",
+        "X264-SD-IT": "\00302X264-SD-IT\003",
+        "X264-SD-PL": "\00302X264-SD-PL\003",
+        "X264-SD-FR": "\00302X264-SD-FR\003",     
+        "X264-SD-DE": "\00302X264-SD-DE\003",
+        "X264-SD-CZ": "\00302X264-SD-CZ\003",
+        "X264-SD-ES": "\00302X264-SD-ES\003",
 #X265
         "X265": "\00311X265\003",
+        "X265-NORDiC": "\00311X265-NORDIC\003",
         "X265-HD": "\00311X265-HD\003",
         "X265-NL": "\00311X265-NL\003",
         "X265-IT": "\00311X265-IT\003",        
@@ -193,18 +198,43 @@ class PreDBSQL(callbacks.Plugin):
         self.session = requests.Session()
         self._last_memory_check = time.time()
         self._cache_hits = 0
-        self._cache_misses = 0           
-
-        # MySQL configuration
+        self._cache_misses = 0     
+        self._url_cache = {}  # Manual cache for successful URL shortenings only
+        # Pending URL queue for releases that don't exist yet
+        self.pending_urls = queue.Queue()
+        self.pending_urls_lock = threading.Lock()
+        self.pending_urls_cache = {}  # Cache to prevent duplicate queuing
+        
+        # MySQL configuration        
         self.db_config = {
-            'host': os.getenv("MYSQL_HOST", "localhost"),
-            'database': os.getenv("MYSQL_DATABASE", "predb"),
-            'user': os.getenv("MYSQL_USER", "predb_user"),
-            'password': os.getenv("MYSQL_PASSWORD"),
-            'port': os.getenv("MYSQL_PORT", 3306),
-            'charset': 'utf8mb4',
-            'collation': 'utf8mb4_unicode_ci'
-        }        
+        'host': os.getenv("MYSQL_HOST"),
+        'database': os.getenv("MYSQL_DATABASE"),
+        'user': os.getenv("MYSQL_USER"),
+        'password': os.getenv("MYSQL_PASSWORD"),
+        'port': int(os.getenv("MYSQL_PORT", 3306)),  # Keep default for port since it's usually 3306
+        'charset': 'utf8mb4',
+        'collation': 'utf8mb4_unicode_ci'
+    }    
+
+        # Load pending URLs from database on startup
+        self._load_pending_urls_from_db()        
+
+        # Start pending URL processor thread
+        self.pending_processor_thread = threading.Thread(
+            target=self._process_pending_urls,
+            daemon=True,
+            name="pending_urls_processor"
+        )
+        self.pending_processor_thread.start()
+
+        self.url_stats = {
+            'immediate_success': 0,
+            'queued': 0,
+            'delayed_success': 0,
+            'failed': 0
+        }                    
+
+    
         
         # Create thread pool with better error handling
         self.thread_pool = ThreadPoolExecutor(
@@ -240,6 +270,8 @@ class PreDBSQL(callbacks.Plugin):
         # Command handlers mapping - ADD ALL YOUR COMMANDS HERE
         self.command_handlers = {
             "!addpre": self.handle_addpre,
+            "!gn": self.handle_addgenre,
+            "!addurl": self.handle_addurl,
             "!info": self.handle_addinfo,
             "!nuke": self.handle_addnuke,
             "!delpre": self.handle_adddelpre,
@@ -328,7 +360,7 @@ class PreDBSQL(callbacks.Plugin):
                 if data.get('nfolink'):
                     nfo_url = data['nfolink'][0]
                     shortened = self.shorten_url(nfo_url)
-                    return f"[ \x033NFO\x03: {shortened} ]"
+                    return f"[ \x033NFO\x03: {shortened} ] "
             except (json.JSONDecodeError, KeyError, IndexError):
                 # Handle JSON parsing errors or missing keys
                 pass
@@ -345,7 +377,7 @@ class PreDBSQL(callbacks.Plugin):
                 if data.get('nfolink'):
                     sfv_url = data['nfolink'][0].replace('.nfo', '.sfv')
                     shortened = self.shorten_url(sfv_url)
-                    return f"[ \x033SFV\x03: {shortened} ]"
+                    return f"[ \x033SFV\x03: {shortened} ] "
             except (json.JSONDecodeError, KeyError, IndexError):
                 pass
         return f"[ \x0305SFV\x03 ]"
@@ -358,7 +390,7 @@ class PreDBSQL(callbacks.Plugin):
         # For SRR, we just need to check if the URL exists (returns 200)
         if content is not None:  # content will be None if request failed or not 200
             shortened = self.shorten_url(url)
-            return f"[ \x033SRR\x03: {shortened} ]"
+            return f"[ \x033SRR\x03: {shortened} ] "
         return f"[ \x0305SRR\x03 ]"
 
     def get_all_links(self, releasename):
@@ -376,15 +408,53 @@ class PreDBSQL(callbacks.Plugin):
     # ========================
     # URL SHORTENING
     # ========================
-    @lru_cache(maxsize=100)
     def shorten_url(self, long_url):
-        """Cached URL shortening with timeout"""
-        try:
-            tinyurl_api = f"https://tinyurl.com/api-create.php?url={long_url}"
-            response = self.session.get(tinyurl_api, timeout=3)
-            return response.text if response.status_code == 200 else long_url
-        except Exception:
-            return long_url
+            """
+            URL shortening with selective caching.
+            
+            Only caches successfully shortened URLs. Failed attempts return the long URL
+            but are NOT cached, allowing retry on subsequent calls.
+            
+            Args:
+                long_url: The full URL to shorten
+                
+            Returns:
+                Shortened TinyURL if successful, otherwise the original long URL
+            """
+            # Check manual cache first - only contains successful shortenings
+            if long_url in self._url_cache:
+                return self._url_cache[long_url]
+            
+            try:
+                tinyurl_api = f"https://tinyurl.com/api-create.php?url={long_url}"
+                # Increased timeout from 3 to 5 seconds for more reliability
+                response = self.session.get(tinyurl_api, timeout=5)
+                
+                # Validate response is a valid HTTP URL
+                if response.status_code == 200 and response.text.startswith('http'):
+                    shortened = response.text.strip()
+                    
+                    # Verify it's actually a TinyURL before caching
+                    if 'tinyurl.com' in shortened and shortened != long_url:
+                        # Cache ONLY successful shortenings
+                        self._url_cache[long_url] = shortened
+                        
+                        # Enforce cache size limit (keep last 100 successful shortenings)
+                        if len(self._url_cache) > 100:
+                            # Remove oldest entry (first item in dict)
+                            oldest_key = next(iter(self._url_cache))
+                            self._url_cache.pop(oldest_key)
+                        
+                        return shortened
+                
+                # Shortening failed - log and return long URL (NOT cached)
+                self.log.warning(f"URL shortening failed for {long_url}: status={response.status_code}")
+                return long_url
+                
+            except Exception as e:
+                # Exception during shortening - log and return long URL (NOT cached)
+                self.log.warning(f"URL shortening exception for {long_url}: {e}")
+                return long_url
         
     # ========================
     # TIME FORMATTING
@@ -717,14 +787,14 @@ class PreDBSQL(callbacks.Plugin):
                 cursor = conn.cursor()
                 if release == "*":
                     cursor.execute("""
-                        SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                        SELECT releasename, section, unixtime, files, size, grp, genre, url, nuked, reason, nukenet 
                         FROM releases 
                         ORDER BY unixtime DESC 
                         LIMIT 1
                     """)
                 else:
                     cursor.execute("""
-                        SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet 
+                        SELECT releasename, section, unixtime, files, size, grp, genre, url, nuked, reason, nukenet 
                         FROM releases 
                         WHERE releasename = %s
                         LIMIT 1
@@ -737,7 +807,7 @@ class PreDBSQL(callbacks.Plugin):
                 return
 
             # Unpack and process result
-            releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet = result
+            releasename, section, unixtime, files, size, grp, genre, url, nuked, reason, nukenet = result
             # Lookup the section color
             section_formatted = self.section_colors.get(section, section)  # Default to section name if not found 
             # Get time_ago string and color
@@ -747,6 +817,12 @@ class PreDBSQL(callbacks.Plugin):
             # Apply the same color to both time displays
             time_ago = f"{time_color}{time_ago_str}\x03"
             pretime_colored = f"{time_color}{pretime_formatted}\x03"
+
+            # Get URL display
+            if url:
+                url_text = f"[ \x033URL\x03: {url} ] "
+            else:
+                url_text = f"[ \x0305URL\x03 ]"
             
             # Get links in parallel
             nfo_text, sfv_text, srr_text = self.get_all_links(releasename)
@@ -768,7 +844,7 @@ class PreDBSQL(callbacks.Plugin):
             message = (
                 f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_colored} ] "
                 f"in {section_and_genre} {info_string}{nuked_details}"
-                f"{nfo_text}{sfv_text}{srr_text}"
+                f"{url_text}{nfo_text}{sfv_text}{srr_text}"
             )
             irc.reply(message)
 
@@ -1559,6 +1635,589 @@ class PreDBSQL(callbacks.Plugin):
             irc.reply(f"Error retrieving section data: {str(e)}")
     section = commands.wrap(section, ['text'])
 
+    def _check_and_process_pending_url_sync(self, conn, releasename):
+        """Check and process pending URL synchronously within the same database transaction"""
+        try:
+            cursor = conn.cursor()
+            
+            # Check if there's a pending URL for this release
+            cursor.execute(
+                "SELECT url FROM pending_urls WHERE releasename = %s",
+                (releasename,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                url = result[0]
+                
+                # Update the release with the pending URL
+                cursor.execute(
+                    "UPDATE releases SET url = %s WHERE releasename = %s",
+                    (url, releasename),
+                )
+                
+                # Remove from pending_urls
+                cursor.execute(
+                    "DELETE FROM pending_urls WHERE releasename = %s",
+                    (releasename,)
+                )
+                
+                # Update cache
+                with self.pending_urls_lock:
+                    if releasename in self.pending_urls_cache:
+                        del self.pending_urls_cache[releasename]
+                
+                self.log.info(f"✓ Processed pending URL for {releasename} during addpre")
+                
+                # Track success
+                self.url_stats['delayed_success'] += 1
+                
+        except Exception as e:
+            self.log.error(f"Error processing pending URL sync for {releasename}: {e}")
+
+    def _load_pending_urls_from_db(self):
+        """Load pending URLs from database on startup"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Check if the table exists first
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM information_schema.tables 
+                    WHERE table_schema = %s 
+                    AND table_name = 'pending_urls'
+                """, (self.db_config['database'],))
+                
+                table_exists = cursor.fetchone()[0] > 0
+                
+                if not table_exists:
+                    self.log.warning("pending_urls table does not exist, skipping load")
+                    return
+                    
+                cursor.execute("SELECT * FROM pending_urls")
+                results = cursor.fetchall()
+                
+                for row in results:
+                    releasename = row[1]
+                    entry = {
+                        'releasename': releasename,
+                        'url': row[2],
+                        'attempt_count': row[3],
+                        'max_attempts': row[4],
+                        'retry_delay': row[5],
+                        'timestamp': row[6]
+                    }
+                    
+                    with self.pending_urls_lock:
+                        self.pending_urls_cache[releasename] = entry
+                        self.pending_urls.put(entry.copy())
+                        
+                self.log.info(f"Loaded {len(results)} pending URLs from database")
+                
+        except Exception as e:
+            self.log.error(f"Error loading pending URLs from DB: {e}")
+
+    def _add_to_pending_queue_db(self, entry):
+        """Add pending URL to database"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO pending_urls 
+                    (releasename, url, attempt_count, max_attempts, retry_delay, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    url = VALUES(url),
+                    attempt_count = VALUES(attempt_count),
+                    timestamp = VALUES(timestamp)
+                """, (
+                    entry['releasename'],
+                    entry['url'],
+                    entry['attempt_count'],
+                    entry['max_attempts'],
+                    entry['retry_delay'],
+                    entry['timestamp']
+                ))
+                conn.commit()
+                
+                with self.pending_urls_lock:
+                    self.pending_urls_cache[entry['releasename']] = entry
+                    self.pending_urls.put(entry.copy())
+                    
+                return True
+        except Exception as e:
+            self.log.error(f"Error adding to pending queue DB: {e}")
+            return False
+
+    def _remove_from_pending_db(self, releasename):
+        """Remove pending URL from database"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM pending_urls WHERE releasename = %s", (releasename,))
+                conn.commit()
+                
+                with self.pending_urls_lock:
+                    if releasename in self.pending_urls_cache:
+                        del self.pending_urls_cache[releasename]
+                        
+                return True
+        except Exception as e:
+            self.log.error(f"Error removing from pending DB: {e}")
+            return False
+
+    def _update_pending_attempt_count(self, releasename, attempt_count):
+        """Update attempt count in database"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE pending_urls 
+                    SET attempt_count = %s, timestamp = %s
+                    WHERE releasename = %s
+                """, (attempt_count, time.time(), releasename))
+                conn.commit()
+                return True
+        except Exception as e:
+            self.log.error(f"Error updating attempt count for {releasename}: {e}")
+            return False
+    
+    # ============
+    # PENDING URLS
+    # ============
+    def _process_pending_urls(self):
+        """Background thread to process pending URLs - IMPROVED VERSION"""
+        while True:
+            try:
+                # Wait for items in the queue
+                pending_entry = self.pending_urls.get(timeout=5)
+                
+                releasename = pending_entry['releasename']
+                url = pending_entry['url']
+                attempt_count = pending_entry['attempt_count']
+                max_attempts = pending_entry['max_attempts']
+                retry_delay = pending_entry['retry_delay']
+                
+                # Check if we should retry
+                if attempt_count >= max_attempts:
+                    self.log.warning(f"Max retries reached for {releasename}, removing from queue")
+                    self.url_stats['failed'] += 1
+                    self._remove_from_pending_db(releasename)
+                    continue
+                
+                try:
+                    with self.db_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT releasename FROM releases WHERE releasename = %s",
+                            (releasename,)
+                        )
+                        existing = cursor.fetchone()
+                        
+                        if existing:
+                            # Release now exists! Update the URL
+                            cursor.execute(
+                                "UPDATE releases SET url = %s WHERE releasename = %s",
+                                (url, releasename),
+                            )
+                            conn.commit()
+                            
+                            self.log.info(f"✓ Processed pending URL for {releasename} (attempt {attempt_count + 1})")
+                            
+                            # Clean up from database
+                            self._remove_from_pending_db(releasename)
+                            
+                            # Track delayed success
+                            self.url_stats['delayed_success'] += 1
+                        else:
+                            # Release still doesn't exist, schedule retry
+                            new_attempt_count = attempt_count + 1
+                            
+                            # Update attempt count in database
+                            if self._update_pending_attempt_count(releasename, new_attempt_count):
+                                # Calculate next retry time
+                                delay = retry_delay * new_attempt_count
+                                next_retry = time.time() + delay
+                                pending_entry['attempt_count'] = new_attempt_count
+                                pending_entry['next_retry'] = next_retry
+                                
+                                # Update local cache
+                                with self.pending_urls_lock:
+                                    if releasename in self.pending_urls_cache:
+                                        self.pending_urls_cache[releasename] = pending_entry
+                                
+                                # Schedule delayed requeue using a timer (non-blocking!)
+                                timer = threading.Timer(delay, self._requeue_pending_url, args=[pending_entry])
+                                timer.daemon = True
+                                timer.start()
+                                
+                                self.log.info(f"⏱ Release {releasename} not found, retry scheduled in {delay}s (attempt {new_attempt_count}/{max_attempts})")
+                            
+                except Exception as e:
+                    self.log.error(f"Error processing pending URL for {releasename}: {e}")
+                    
+            except queue.Empty:
+                # No items in queue, continue waiting
+                continue
+            except Exception as e:
+                self.log.error(f"Error in pending URL processor: {e}")
+
+    def _requeue_pending_url(self, pending_entry):
+        """Requeue a pending URL after delay (called by timer)"""
+        self.pending_urls.put(pending_entry)
+        self.log.debug(f"Requeued {pending_entry['releasename']} for retry") 
+
+    def _check_pending_urls_after_addpre(self, releasename):
+        """Check if there are pending URLs for a newly added release - IMPROVED VERSION"""
+        with self.pending_urls_lock:
+            if releasename in self.pending_urls_cache:
+                pending_entry = self.pending_urls_cache[releasename].copy()
+                
+                # IMMEDIATE PROCESSING: Process right now instead of waiting in queue
+                self.log.info(f"⚡ Immediate processing triggered for pending URL: {releasename}")
+                
+                # Submit to thread pool for immediate processing
+                self.thread_pool.submit(self._process_pending_url_immediately, pending_entry)
+
+    def _process_pending_url_immediately(self, pending_entry):
+        """Process a pending URL immediately when its release is added"""
+        releasename = pending_entry['releasename']
+        url = pending_entry['url']
+        
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Double-check the release exists
+                cursor.execute(
+                    "SELECT releasename FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Update the URL
+                    cursor.execute(
+                        "UPDATE releases SET url = %s WHERE releasename = %s",
+                        (url, releasename),
+                    )
+                    conn.commit()
+                    
+                    self.log.info(f"✓ Immediately processed pending URL for {releasename}")
+                    
+                    # Clean up from database and cache
+                    self._remove_from_pending_db(releasename)
+                    
+                    # Track success
+                    self.url_stats['delayed_success'] += 1
+                else:
+                    # Race condition - release doesn't exist yet, requeue normally
+                    self.pending_urls.put(pending_entry)
+                    self.log.warning(f"Release {releasename} not found during immediate processing, requeued")
+                    
+        except Exception as e:
+            self.log.error(f"Error immediately processing pending URL for {releasename}: {e}")
+            # Requeue on error
+            self.pending_urls.put(pending_entry)                
+
+    # ===========
+    # PENDINGURLS
+    # ===========
+    def pendingurls(self, irc, msg, args):
+        """Show pending URLs waiting for releases to be added"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM pending_urls ORDER BY timestamp DESC LIMIT 10")
+                results = cursor.fetchall()
+                
+                if not results:
+                    irc.reply("[ No pending URLs waiting for releases ]")
+                    return
+                
+                irc.reply(f"PM'ing {len(results)} pending URLs to {msg.nick}")
+                
+                for row in results:
+                    releasename = row[1]
+                    url = row[2]
+                    attempt_count = row[3]
+                    max_attempts = row[4]
+                    timestamp = row[6]
+                    
+                    # Calculate time ago
+                    time_ago_str, _ = self.format_time_ago(timestamp)
+                    
+                    message = f"[ {releasename} ] → {url} (attempts: {attempt_count}/{max_attempts}, queued: {time_ago_str})"
+                    irc.reply(message, private=True)
+        
+        except Exception as e:
+            self.log.error(f"Error in pendingurls: {e}")
+            irc.reply(f"Error retrieving pending URLs: {str(e)}")
+
+    def processpendingurls(self, irc, msg, args):
+            """Manually process all pending URLs and match with existing releases"""
+            
+            # Security check
+            if msg.nick != 'klapvogn':
+                irc.reply("Error: You do not have permission to use this command.")
+                return
+            
+            try:
+                with self.db_connection() as conn:
+                    cursor = conn.cursor()
+                    
+                    # Get all pending URLs
+                    cursor.execute("SELECT releasename, url FROM pending_urls")
+                    pending_entries = cursor.fetchall()
+                    
+                    if not pending_entries:
+                        irc.reply("No pending URLs to process")
+                        return
+                    
+                    processed_count = 0
+                    not_found_count = 0
+                    error_count = 0
+                    
+                    irc.reply(f"Processing {len(pending_entries)} pending URLs...")
+                    
+                    for releasename, url in pending_entries:
+                        try:
+                            # Check if release exists
+                            cursor.execute(
+                                "SELECT releasename FROM releases WHERE releasename = %s",
+                                (releasename,)
+                            )
+                            existing = cursor.fetchone()
+                            
+                            if existing:
+                                # Release exists! Update the URL
+                                cursor.execute(
+                                    "UPDATE releases SET url = %s WHERE releasename = %s",
+                                    (url, releasename),
+                                )
+                                
+                                # Remove from pending_urls
+                                cursor.execute(
+                                    "DELETE FROM pending_urls WHERE releasename = %s",
+                                    (releasename,)
+                                )
+                                
+                                conn.commit()
+                                
+                                # Update cache
+                                with self.pending_urls_lock:
+                                    if releasename in self.pending_urls_cache:
+                                        del self.pending_urls_cache[releasename]
+                                
+                                processed_count += 1
+                                self.log.info(f"Processed pending URL for {releasename}")
+                                
+                                # Track success
+                                self.url_stats['delayed_success'] += 1
+                            else:
+                                not_found_count += 1
+                                
+                        except Exception as e:
+                            error_count += 1
+                            self.log.error(f"Error processing {releasename}: {e}")
+                    
+                    # Final report
+                    message = (
+                        f"[ Pending URLs Processed ] "
+                        f"[ Matched & Updated: \x0303{processed_count}\x03 ] "
+                        f"[ Not Found: \x0307{not_found_count}\x03 ] "
+                        f"[ Errors: \x0304{error_count}\x03 ]"
+                    )
+                    irc.reply(message)
+                    
+            except Exception as e:
+                self.log.error(f"Error in processpendingurls: {e}")
+                irc.reply(f"Error processing pending URLs: {str(e)}")
+        
+    processpendingurls = commands.wrap(processpendingurls, [])
+
+
+    # Optional: Version with detailed output
+    def processpendingurlsverbose(self, irc, msg, args):
+        """Manually process all pending URLs with detailed output"""
+        
+        # Security check
+        if msg.nick != 'klapvogn':
+            irc.reply("Error: You do not have permission to use this command.")
+            return
+        
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get all pending URLs
+                cursor.execute("SELECT releasename, url, attempt_count FROM pending_urls")
+                pending_entries = cursor.fetchall()
+                
+                if not pending_entries:
+                    irc.reply("No pending URLs to process")
+                    return
+                
+                irc.reply(f"Processing {len(pending_entries)} pending URLs, sending results to PM...")
+                
+                processed_count = 0
+                not_found_count = 0
+                error_count = 0
+                
+                for releasename, url, attempt_count in pending_entries:
+                    try:
+                        # Check if release exists
+                        cursor.execute(
+                            "SELECT releasename FROM releases WHERE releasename = %s",
+                            (releasename,)
+                        )
+                        existing = cursor.fetchone()
+                        
+                        if existing:
+                            # Release exists! Update the URL
+                            cursor.execute(
+                                "UPDATE releases SET url = %s WHERE releasename = %s",
+                                (url, releasename),
+                            )
+                            
+                            # Remove from pending_urls
+                            cursor.execute(
+                                "DELETE FROM pending_urls WHERE releasename = %s",
+                                (releasename,)
+                            )
+                            
+                            conn.commit()
+                            
+                            # Update cache
+                            with self.pending_urls_lock:
+                                if releasename in self.pending_urls_cache:
+                                    del self.pending_urls_cache[releasename]
+                            
+                            processed_count += 1
+                            self.url_stats['delayed_success'] += 1
+                            
+                            # Send detailed success message
+                            irc.reply(
+                                f"[\x0303✓\x03] {releasename} → URL added (was pending {attempt_count} attempts)",
+                                private=True
+                            )
+                        else:
+                            not_found_count += 1
+                            irc.reply(
+                                f"[\x0307○\x03] {releasename} → Release not found yet",
+                                private=True
+                            )
+                            
+                    except Exception as e:
+                        error_count += 1
+                        self.log.error(f"Error processing {releasename}: {e}")
+                        irc.reply(
+                            f"[\x0304✗\x03] {releasename} → Error: {str(e)}",
+                            private=True
+                        )
+                
+                # Final summary
+                message = (
+                    f"[ Summary ] "
+                    f"[ Matched: \x0303{processed_count}\x03 ] "
+                    f"[ Not Found: \x0307{not_found_count}\x03 ] "
+                    f"[ Errors: \x0304{error_count}\x03 ]"
+                )
+                irc.reply(message)
+                
+        except Exception as e:
+            self.log.error(f"Error in processpendingurlsverbose: {e}")
+            irc.reply(f"Error processing pending URLs: {str(e)}")
+    
+    processpendingurlsverbose = commands.wrap(processpendingurlsverbose, [])
+
+
+    # Optional: Process a single pending URL by releasename
+    def processpendingurl(self, irc, msg, args, releasename):
+        """<releasename> - Process a specific pending URL"""
+        
+        # Security check
+        if msg.nick != 'klapvogn':
+            irc.reply("Error: You do not have permission to use this command.")
+            return
+        
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get the pending URL
+                cursor.execute(
+                    "SELECT url FROM pending_urls WHERE releasename = %s",
+                    (releasename,)
+                )
+                result = cursor.fetchone()
+                
+                if not result:
+                    irc.reply(f"No pending URL found for: {releasename}")
+                    return
+                
+                url = result[0]
+                
+                # Check if release exists
+                cursor.execute(
+                    "SELECT releasename FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Release exists! Update the URL
+                    cursor.execute(
+                        "UPDATE releases SET url = %s WHERE releasename = %s",
+                        (url, releasename),
+                    )
+                    
+                    # Remove from pending_urls
+                    cursor.execute(
+                        "DELETE FROM pending_urls WHERE releasename = %s",
+                        (releasename,)
+                    )
+                    
+                    conn.commit()
+                    
+                    # Update cache
+                    with self.pending_urls_lock:
+                        if releasename in self.pending_urls_cache:
+                            del self.pending_urls_cache[releasename]
+                    
+                    self.url_stats['delayed_success'] += 1
+                    
+                    irc.reply(f"✓ Processed pending URL for: {releasename}")
+                else:
+                    irc.reply(f"Release not found in database: {releasename}")
+                    
+        except Exception as e:
+            self.log.error(f"Error in processpendingurl: {e}")
+            irc.reply(f"Error processing pending URL: {str(e)}")
+    
+    processpendingurl = commands.wrap(processpendingurl, ['text'])            
+
+    # =========
+    # URL STATS
+    # =========    
+    def urlstats(self, irc, msg, args):
+        """Show URL processing statistics"""
+        stats = self.url_stats
+        total_processed = stats['immediate_success'] + stats['delayed_success']
+        success_rate = (total_processed / max(1, stats['queued'] + stats['immediate_success'])) * 100
+        
+        message = (
+            f"[ URL Processing Stats ] "
+            f"[ Immediate: {stats['immediate_success']} ] "
+            f"[ Queued: {stats['queued']} ] "
+            f"[ Delayed Success: {stats['delayed_success']}] "
+            f"[ Failed: {stats['failed']} ] "
+            f"[ Success Rate: {success_rate:.1f}% ]"
+        )
+        irc.reply(message)
+
+    urlstats = commands.wrap(urlstats, [])      
 
     # ========================
     # BACKGROUND TASK HANDLING
@@ -1582,27 +2241,22 @@ class PreDBSQL(callbacks.Plugin):
         try:
             self.log.debug(f"Starting _addpre_thread for: {releasename}")
             
-            # Test if we can even create a connection
-            self.log.debug("Attempting to create database connection...")
             with self.db_connection() as conn:
                 self.log.debug("Database connection successful")
                 
-                self.log.debug("Creating cursor...")
                 cursor = conn.cursor()
-                self.log.debug("Cursor created successfully")
-                
-                self.log.debug(f"Executing INSERT IGNORE with values: {releasename}, {section}, {group}")
                 cursor.execute(
                     "INSERT IGNORE INTO releases (releasename, section, grp) VALUES (%s, %s, %s)",
                     (releasename, section, group),
                 )
-                self.log.debug(f"Query executed, rowcount: {cursor.rowcount}")
-                
                 conn.commit()
-                self.log.debug("Changes committed")
                 
                 if cursor.rowcount > 0:
                     self.log.debug("New release, announcing...")
+                    
+                    # Process pending URL immediately in same transaction
+                    self._check_and_process_pending_url_sync(conn, releasename)
+                    
                     self.announce_pre(irc, releasename, section)
                 else:
                     self.log.debug("Release already exists")
@@ -1610,8 +2264,177 @@ class PreDBSQL(callbacks.Plugin):
                     
         except Exception as e:
             self.log.error(f"Addpre error: {repr(e)}")
-            self.log.error(f"Error type: {type(e).__name__}")
-            self.log.error(f"Full traceback: {traceback.format_exc()}")     
+
+    # ========
+    # ADDGENRE
+    # ========
+    def handle_addgenre(self, irc, msg, args):
+        """Threadpool-based genre handler"""
+        if msg.nick not in ["CTW_PRE", "klapvogn", "Bette"]:
+            return
+        
+        if len(args) < 2:
+            irc.reply("Usage: !gn <releasename> <genre>")
+            return
+        
+        releasename = args[0]
+        # Replace forward slashes with underscores in genre
+        genre = args[1].replace("/", "_")
+        
+        # Log what we're processing
+        self.log.info(f"Processing !gn command: release='{releasename}', genre='{genre}'")
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._addgenre_thread, irc, releasename, genre)
+
+    def _addgenre_thread(self, irc, releasename, genre):
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Atomic update: only update if genre is NULL or empty
+                cursor.execute(
+                    """
+                    UPDATE releases 
+                    SET genre = %s 
+                    WHERE releasename = %s 
+                    AND (genre IS NULL OR genre = '' OR TRIM(genre) = '')
+                    """,
+                    (genre, releasename),
+                )
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    self.log.info(f"Updated genre for {releasename} to {genre}")
+                    irc.reply(f"Genre updated: {releasename} → {genre}")
+                else:
+                    # Check why it failed - release doesn't exist or genre already set
+                    cursor.execute(
+                        "SELECT releasename, genre FROM releases WHERE releasename = %s",
+                        (releasename,)
+                    )
+                    existing = cursor.fetchone()
+                    
+                    if not existing:
+                        self.log.warning(f"No release found with name: {releasename}")
+                        # Uncomment if you want to notify about missing releases
+                        # irc.reply(f"Release not found: {releasename}")
+                    else:
+                        current_genre = existing[1]
+                        self.log.info(f"Genre already exists for {releasename}: {current_genre}")
+                        irc.reply(f"Genre already set: {releasename} → {current_genre}")
+                        
+        except Exception as e:
+            self.log.error(f"Addgenre error: {e}", exc_info=True)
+            irc.reply(f"Error updating genre: {str(e)}")       
+
+    # =======
+    # ADDURL
+    # =======
+    def handle_addurl(self, irc, msg, args):
+        """Threadpool-based URL handler"""
+        if msg.nick not in ["CTW_PRE", "klapvogn", "Bette"]:
+            return
+        
+        if len(args) < 2:
+            irc.reply("Usage: !addurl <releasename> <url>")
+            return
+        
+        releasename = args[0]
+        url = args[1]
+        
+        # Log what we're processing
+        self.log.info(f"Processing !addurl command: release='{releasename}', url='{url}'")
+        
+        # Submit to thread pool
+        self.thread_pool.submit(self._addurl_thread, irc, releasename, url)
+
+    def _addurl_thread(self, irc, releasename, url):
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # First check if the release exists
+                cursor.execute(
+                    "SELECT releasename FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                existing = cursor.fetchone()
+                
+                if not existing:                    
+                    self.log.warning(f"No release found with name: {releasename} - checking if already queued")
+                    
+                    # Check if this release is already in the pending queue
+                    cursor.execute(
+                        "SELECT releasename FROM pending_urls WHERE releasename = %s",
+                        (releasename,)
+                    )
+                    already_queued = cursor.fetchone()
+                    
+                    if already_queued:
+                        # Already queued - just update the URL if it's different
+                        cursor.execute(
+                            "UPDATE pending_urls SET url = %s, attempt_count = 0, timestamp = %s WHERE releasename = %s",
+                            (url, time.time(), releasename)
+                        )
+                        conn.commit()
+                        irc.reply(f"Release {releasename} already queued - updated URL and reset retry counter")
+                        return
+                    
+                    # Not queued yet - add to queue
+                    self.url_stats['queued'] += 1
+
+                    # Create pending entry
+                    pending_entry = {
+                        'releasename': releasename,
+                        'url': url,
+                        'attempt_count': 0,
+                        'timestamp': time.time(),
+                        'max_attempts': 10,
+                        'retry_delay': 30
+                    }
+                    
+                    # Add to database-persisted queue
+                    if self._add_to_pending_queue_db(pending_entry):
+                        self.log.info(f"Queued URL for later processing: {releasename}")
+                        irc.reply(f"Release {releasename} not found - URL queued for later processing")
+                    else:
+                        irc.reply(f"Error queuing URL for {releasename}")
+                    return
+                
+                # Release exists - update it directly
+                cursor.execute(
+                    "UPDATE releases SET url = %s WHERE releasename = %s",
+                    (url, releasename),
+                )
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    self.log.info(f"Updated URL for {releasename} to {url}")
+
+                    # Track immediate success
+                    self.url_stats['immediate_success'] += 1                    
+                    
+                    # Clean up from pending cache/db if it was there
+                    self._remove_from_pending_db(releasename)
+                        
+                    irc.reply(f"URL updated: {releasename} → {url}")
+                else:
+                    # Check if URL is already the same
+                    cursor.execute(
+                        "SELECT url FROM releases WHERE releasename = %s",
+                        (releasename,)
+                    )
+                    current_url = cursor.fetchone()
+                    if current_url and current_url[0] == url:
+                        irc.reply(f"URL already set: {releasename} → {url}")
+                    else:
+                        self.log.warning(f"URL Update failed for: {releasename}")
+                        irc.reply(f"URL already set: {releasename}")
+                        
+        except Exception as e:
+            self.log.error(f"Addurl error: {e}", exc_info=True)
+            irc.reply(f"Error updating URL: {str(e)}")
 
     # =======
     # ADDNUKE
@@ -2115,7 +2938,8 @@ class PreDBSQL(callbacks.Plugin):
                         SUM(nuked = '2') AS unnukes,
                         SUM(nuked = '3') AS modnukes,
                         SUM(nuked = '4') AS delpres,
-                        SUM(nuked = '5') AS undelpres,                                                                                      
+                        SUM(nuked = '5') AS undelpres,
+                        SUM(CASE WHEN url IS NOT NULL AND url != '' THEN 1 ELSE 0 END) AS url_count,
                         (SELECT releasename FROM releases ORDER BY unixtime DESC LIMIT 1)
                     FROM releases
                 """, (int(start_of_today),))
@@ -2136,7 +2960,7 @@ class PreDBSQL(callbacks.Plugin):
         cache_key = int(time.time() // 60)  # Cache for 60 seconds
         stats = self._get_db_stats_cached(cache_key)
         if stats:
-            total, today, nuked, unnuked, modnuked, delpred, undelpred, last_pre = stats
+            total, today, nuked, unnuked, modnuked, delpred, undelpred, url_count, last_pre = stats
             # Convert None values to 0 for counts
             total = total or 0
             today = today or 0
@@ -2145,11 +2969,13 @@ class PreDBSQL(callbacks.Plugin):
             undelpred = undelpred or 0
             unnuked = unnuked or 0
             modnuked = modnuked or 0
+            url_count = url_count or 0
 
             irc.reply(
                 f"[ PRE DATABASE ] [ \x033RELEASES\x03: {self.human_readable_number(total)} ] "
-                f"[ \x033TODAY\x03: {self.human_readable_number(today)} ] [ \x0305NUKES\x03: {self.human_readable_number(nuked)} ] "
-                f"[ \x033UNNUKES\x03: {self.human_readable_number(unnuked)} ] [ \x034MODNUKES\x03: {self.human_readable_number(modnuked)} ] [ \x034DELPRES\x03: {self.human_readable_number(delpred)} ] [ \x033UNDELPRES\x03: {self.human_readable_number(undelpred)} ]"
+                f"[ \x033TODAY\x03: {self.human_readable_number(today)} ] [ \x0303URLS\x03: {self.human_readable_number(url_count)} ] [ \x0305NUKES\x03: {self.human_readable_number(nuked)} ] "
+                f"[ \x033UNNUKES\x03: {self.human_readable_number(unnuked)} ] [ \x034MODNUKES\x03: {self.human_readable_number(modnuked)} ] "
+                f"[ \x034DELPRES\x03: {self.human_readable_number(delpred)} ] [ \x033UNDELPRES\x03: {self.human_readable_number(undelpred)} ] "
                 f"[ \x0306Last Pre\x03: {last_pre or 'None'} ]"
             )
         else:
@@ -2565,12 +3391,12 @@ class PreDBSQL(callbacks.Plugin):
                 releasename, reason, nukenet, grp = result
 
                 cursor.execute(
-                    "INSERT INTO releases (releasename, section, unixtime, grp, reason, nukenet, nuked) VALUES (%s, %s %s, %s, %s, %s, 3)",
+                    "INSERT INTO releases (releasename, section, unixtime, grp, reason, nukenet, nuked) VALUES (%s, %s, %s, %s, %s, %s, 3)",
                     (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet),
                 )
 
                 # Delete from new_nukes
-                cursor.execute("DELETE FROM new_nukes WHERE id = ?", (modnuke_id,))
+                cursor.execute("DELETE FROM new_nukes WHERE id = %s", (modnuke_id,))
                 conn.commit()
 
                 irc.reply(f"Moved {releasename} to main database with unixtime {new_unixtime}")
