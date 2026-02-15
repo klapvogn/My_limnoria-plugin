@@ -1,9 +1,11 @@
 import mysql.connector
-from mysql.connector import Error
+from mysql.connector import Error, pooling
 import time
 import queue
 import threading
+import re
 import json
+from urllib.parse import quote
 from dotenv import load_dotenv
 import os
 import requests
@@ -12,22 +14,49 @@ import supybot.ircmsgs as ircmsgs
 import supybot.commands as commands
 import supybot.world as world
 import contextlib  # For better connection management
-from datetime import datetime, date, time as datetime_time
+from datetime import datetime, date
 from functools import lru_cache
 from supybot.commands import wrap, optional
 from concurrent.futures import ThreadPoolExecutor
-from threading import Thread
+from threading import Thread, Lock
 from collections import OrderedDict
 from pathlib import Path
-#import psutil
-#import re
-#import traceback
-#from difflib import SequenceMatcher
+import functools
 
 # Load .env from the plugin directory
 plugin_dir = Path(__file__).parent
 env_path = plugin_dir / '.env'
 load_dotenv(dotenv_path=env_path)
+
+# ====================
+# DISCOGS RATE LIMITER
+# ====================
+class DiscogsRateLimiter:
+    """
+    Thread-safe rate limiter for Discogs API calls.
+    Discogs allows 60 requests/minute for authenticated users.
+    Using 25/minute as conservative limit to avoid bursts.
+    """
+    def __init__(self, calls_per_minute=25):
+        self.calls_per_minute = calls_per_minute
+        self.calls = []
+        self.condition = threading.Condition()
+    
+    def wait_if_needed(self):
+        with self.condition:
+            now = time.time()
+            cutoff = now - 60
+            self.calls = [t for t in self.calls if t > cutoff]
+            
+            if len(self.calls) >= self.calls_per_minute:
+                sleep_time = 60 - (now - self.calls[0])
+                if sleep_time > 0:
+                    self.condition.wait(timeout=sleep_time)
+                    now = time.time()
+                    cutoff = now - 60
+                    self.calls = [t for t in self.calls if t > cutoff]
+            
+            self.calls.append(time.time())
 
 class PreDBSQL(callbacks.Plugin):
     """Tracks pre database entries and announces them."""
@@ -187,11 +216,47 @@ class PreDBSQL(callbacks.Plugin):
         "BOOKWARE-0DAY": "\00309BOOKWARE-0DAY\003",        
         "EBOOK": "\00309EBOOK\003",
         "EBOOK-FOREIGN": "\00309EBOOK-FOREIGN\003",
-    }   
+    }
+
+    MUSIC_SECTIONS = {
+        'MP3', 'MP3-WEB', 'FLAC', 'FLAC-WEB', 'FLACFR', 
+        'FLAC-FR', 'ABOOK', 'MVID', 'MViD', 'MDVDR', 'MBLURAY'
+    }
+
+    # ================
+    # DECORATORS
+    # ================
+    @staticmethod
+    def admin_only(func):
+        """Decorator to restrict commands to admin user only"""
+        @functools.wraps(func)  # Preserves function metadata
+        def wrapper(self, irc, msg, args, *rest):
+            #if msg.nick != 'klapvogn':
+            if msg.nick != self.registryValue('adminNick'):
+                irc.reply("Error: You do not have permission to use this command.")
+                return
+            return func(self, irc, msg, args, *rest)
+        return wrapper
+
+    # Also add a decorator for multiple authorized users
+    @staticmethod
+    def authorized_only(allowed_nicks):
+        """Decorator for multiple authorized users"""
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(self, irc, msg, args, *rest):
+                if msg.nick not in allowed_nicks:
+                    irc.reply("Error: You do not have permission to use this command.")
+                    return
+                return func(self, irc, msg, args, *rest)
+            return wrapper
+        return decorator    
     
     def __init__(self, irc):
         super().__init__(irc)
         self.log = world.log
+        # Initialize Discogs rate limiter
+        self.discogs_limiter = DiscogsRateLimiter(calls_per_minute=25)        
         self.target_irc_state = None
         self._last_cache_key = None
         self._cached_stats = None
@@ -204,7 +269,30 @@ class PreDBSQL(callbacks.Plugin):
         self.pending_urls = queue.Queue()
         self.pending_urls_lock = threading.Lock()
         self.pending_urls_cache = {}  # Cache to prevent duplicate queuing
+        # Load Discogs API credentials
+        self.discogs_token = os.getenv('DISCOGS_TOKEN')
+        if self.discogs_token:
+            self.log.info("Discogs API token loaded")
+        else:
+            self.log.warning("DISCOGS_TOKEN not found in environment - Discogs lookups will be disabled")
+              
+        # iMDB/TMDB URL Fetcher
+        # IMDb suggestion API (no key required)
+        self.imdb_search_url = "https://v2.sg.media-imdb.com/suggests/{prefix}/{query}.json"
         
+        # TMDb API (optional - get key from https://www.themoviedb.org/settings/api)
+        # If you don't have a key, IMDb-only works fine for most movies
+        self.tmdb_api_key = os.getenv("TMDB_API_KEY", "")
+        self.tmdb_search_url = "https://api.themoviedb.org/3/search/movie"
+        self.tmdb_tv_search_url = "https://api.themoviedb.org/3/search/tv"
+
+        # Track URL fetch stats
+        self.url_fetch_stats = {
+            'attempted': 0,
+            'succeeded': 0,
+            'failed': 0
+        }        
+
         # MySQL configuration        
         self.db_config = {
         'host': os.getenv("MYSQL_HOST"),
@@ -214,7 +302,22 @@ class PreDBSQL(callbacks.Plugin):
         'port': int(os.getenv("MYSQL_PORT", 3306)),  # Keep default for port since it's usually 3306
         'charset': 'utf8mb4',
         'collation': 'utf8mb4_unicode_ci'
-    }    
+    }
+        # Create connection pool
+        self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+            pool_name="predb_pool",
+            pool_size=5,  # Adjust based on your needs
+            pool_reset_session=True,
+            **self.db_config
+        )
+
+        self.nuke_handlers = {
+            'nuke': {'type': '1', 'check': '1', 'name': 'nuke', 'pending_cmd': 'newnukes'},
+            'unnuke': {'type': '2', 'check': '2', 'name': 'unnuke', 'pending_cmd': 'newunnukes'},
+            'modnuke': {'type': '3', 'check': '3', 'name': 'modnuke', 'pending_cmd': 'newmodnukes'},
+            'delpre': {'type': '4', 'check': '4', 'name': 'delpre', 'pending_cmd': 'newdelpres'},
+            'undelpre': {'type': '5', 'check': '5', 'name': 'undelpre', 'pending_cmd': 'newundelpres'},
+        }         
 
         # Load pending URLs from database on startup
         self._load_pending_urls_from_db()        
@@ -234,8 +337,6 @@ class PreDBSQL(callbacks.Plugin):
             'failed': 0
         }                    
 
-    
-        
         # Create thread pool with better error handling
         self.thread_pool = ThreadPoolExecutor(
             max_workers=3,  # Reduced from 5 to prevent resource exhaustion
@@ -252,15 +353,10 @@ class PreDBSQL(callbacks.Plugin):
         self.sfv_cache = OrderedDict()
         self.srr_cache = OrderedDict()
                
-    # ========================
-    # DATABASE CONNECTION POOL
-    # ========================
-    # Optional: Add connection pool
-        self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-            pool_name="predb_pool",
-            pool_size=5,
-            **self.db_config
-        )
+        # Thread-safe cache locks
+        self.nfo_cache_lock = threading.Lock()
+        self.sfv_cache_lock = threading.Lock()
+        self.srr_cache_lock = threading.Lock()
 
         # Cache for release name matching to avoid repeated DB lookups
         self.release_cache = {}
@@ -274,15 +370,441 @@ class PreDBSQL(callbacks.Plugin):
             "!addurl": self.handle_addurl,
             "!info": self.handle_addinfo,
             "!nuke": self.handle_addnuke,
+            "!unnuke": self.handle_addunnuke,
+            "!modnuke": self.handle_addmodnuke,
             "!delpre": self.handle_adddelpre,
             "!undelpre": self.handle_addundelpre,
-            "!modnuke": self.handle_addmodnuke,
-            "!unnuke": self.handle_addunnuke,
         }
+
+    def discogs(self, irc, msg, args, releasename):
+        """<releasename> - Search Discogs for a music release and update the URL in the database
+        
+        Searches Discogs API for the specified music release and stores the URL in your predb.
+        Requires DISCOGS_TOKEN in .env file.
+        
+        Usage: +discogs <releasename>
+        Example: +discogs Wreckless-Unforced_Rhythms-(DISWRLP001BP)-16BIT-WEB-FLAC-2026-PTC
+        """
+        if not releasename:
+            irc.reply("Usage: +discogs <releasename>")
+            return
+        
+        # Check if Discogs token is configured
+        if not getattr(self, 'discogs_token', None):
+            irc.reply("⚠ Discogs API token not configured. Add DISCOGS_TOKEN to .env file.")
+            return
+        
+        # Check if release exists in database
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT section, url FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                result = cursor.fetchone()
+                
+                if not result:
+                    irc.reply(f"Release '{releasename}' not found in database")
+                    return
+                
+                section, current_url = result
+                
+                if section not in self.MUSIC_SECTIONS:
+                    irc.reply(f"Release is in section '{section}', not a music section")
+                    return
+                
+                if current_url:
+                    irc.reply(f"Release already has URL: {current_url} - Searching anyway...")
+        
+        except Exception as e:
+            self.log.error(f"Error checking release: {e}")
+            irc.reply("Database error while checking release")
+            return
+        
+        irc.reply(f"🔍 Searching Discogs API for: {releasename}")
+        
+        # Run in thread to avoid blocking IRC
+        def lookup_thread():
+            # PASS IRC for announcements
+            url, message = self._process_discogs_lookup(releasename, announce_irc=irc)
+            if url:
+                irc.reply(f"✓ {message}")
+                # announce_url() already called in _process_discogs_lookup
+            else:
+                irc.reply(f"✗ {message}")
+        
+        thread = Thread(target=lookup_thread, daemon=True)
+        thread.start()
+
+    discogs = wrap(discogs, ['text'])
+
+    def autodiscogs(self, irc, msg, args, enable_disable):
+        """<on|off> - Enable or disable automatic Discogs lookup for new music releases
+        
+        When enabled, the bot will automatically search Discogs and update URLs
+        for all new music releases as they are announced.
+        
+        Usage: +autodiscogs on|off
+        """
+        if not enable_disable or enable_disable.lower() not in ['on', 'off']:
+            current_status = "enabled" if self.registryValue('autoDiscogs') else "disabled"
+            irc.reply(f"Automatic Discogs lookup is currently {current_status}. Usage: +autodiscogs <on|off>")
+            return
+        
+        new_value = (enable_disable.lower() == 'on')
+        self.setRegistryValue('autoDiscogs', new_value)
+
+        status = "enabled" if new_value else "disabled"
+        irc.reply(f"✓ Automatic Discogs lookup {status}")
+        self.log.info(f"Automatic Discogs lookup {status}")
+
+    autodiscogs = wrap(autodiscogs, ['text'])    
+
+    # ==========================================
+    # AUTO URL FETCHER METHODS FOR iMDB AND TMDB
+    # ==========================================
+    def parse_release_name(self, releasename):
+        """Extract clean title, year, and type from scene release name"""
+        # Remove group at the end
+        main = releasename.rsplit('-', 1)[0] if '-' in releasename else releasename
+        
+        # TV patterns: Show.Name.S01E02 or Show.Name.01x02
+        tv_patterns = [
+            (r'^(.*?)\.[Ss](\d{1,2})[Ee](\d{1,2})', 'tv_season_episode'),
+            (r'^(.*?)\.(\d{1,2})x(\d{1,2})', 'tv_season_episode'),
+            (r'^(.*?)\.S(\d{1,2})D(\d{1,2})', 'tv_season_disc'),  # S01D01 format
+            (r'^(.*?)\.Complete\.S(\d{1,2})', 'tv_complete_season'),
+            (r'^(.*?)\.Season\.(\d{1,2})', 'tv_season'),
+        ]
+        
+        for pattern, tv_type in tv_patterns:
+            match = re.match(pattern, main, re.IGNORECASE)
+            if match:
+                title = match.group(1).replace('.', ' ').strip()
+                season = match.group(2)
+                return {
+                    'type': 'tv',
+                    'title': title,
+                    'season': season,
+                    'year': None,
+                    'tv_type': tv_type
+                }
+        
+        # Movie pattern: Title.2024.1080p... or Title.2024.BluRay...
+        movie_match = re.match(r'^(.*?)\.(\d{4})\.', main)
+        if movie_match:
+            title = movie_match.group(1).replace('.', ' ').strip()
+            year = movie_match.group(2)
+            return {
+                'type': 'movie',
+                'title': title,
+                'year': year,
+                'season': None
+            }
+        
+        # Fallback: just clean up dots, no year found
+        title = main.split('.')[0].replace('.', ' ').strip()
+        return {
+            'type': 'unknown',
+            'title': title,
+            'year': None,
+            'season': None
+        }
+
+    def fetch_imdb_url(self, title, year=None):
+        """Fetch IMDb URL using IMDb's suggestion API (no API key needed)"""
+        try:
+            # Clean title for IMDb search
+            search_title = re.sub(r'[^\w\s]', '', title).lower().strip()
+            if not search_title:
+                return None
+                
+            prefix = search_title[0] if search_title[0].isalnum() else 't'
+            query = quote(search_title.replace(' ', '_'))
+            
+            url = self.imdb_search_url.format(prefix=prefix, query=query)
+            response = self.session.get(url, timeout=5)
+            
+            if response.status_code != 200:
+                return None
+            
+            # Parse JSONP format: imdb$title(data)
+            text = response.text
+            if '(' not in text or not text.endswith(')'):
+                return None
+                
+            # Extract JSON from JSONP wrapper
+            json_str = text[text.find('(')+1:-1]
+            data = json.loads(json_str)
+            
+            results = data.get('d', [])
+            if not results:
+                return None
+            
+            # Try to match by year first if provided
+            if year:
+                for item in results:
+                    item_year = str(item.get('y', ''))
+                    if item_year == year:
+                        imdb_id = item.get('id')
+                        if imdb_id and imdb_id.startswith('tt'):
+                            return f"https://www.imdb.com/title/{imdb_id}/"
+            
+            # Return first result if no year match or no year provided
+            imdb_id = results[0].get('id')
+            if imdb_id and imdb_id.startswith('tt'):
+                return f"https://www.imdb.com/title/{imdb_id}/"
+                
+        except Exception as e:
+            self.log.debug(f"IMDb fetch error for '{title}': {e}")
+        return None
+
+    def fetch_tmdb_movie_url(self, title, year=None):
+        """Fetch TMDb movie URL (requires API key)"""
+        if not self.tmdb_api_key:
+            return None
+            
+        try:
+            params = {
+                'api_key': self.tmdb_api_key,
+                'query': title,
+                'page': 1
+            }
+            if year:
+                params['year'] = year
+                
+            response = self.session.get(self.tmdb_search_url, params=params, timeout=5)
+            data = response.json()
+            
+            if data.get('results'):
+                movie_id = data['results'][0]['id']
+                return f"https://www.themoviedb.org/movie/{movie_id}"
+                
+        except Exception as e:
+            self.log.debug(f"TMDb movie fetch error for '{title}': {e}")
+        return None
+
+    def fetch_tmdb_tv_url(self, title, season=None):
+        """Fetch TMDb TV URL (requires API key)"""
+        if not self.tmdb_api_key:
+            return None
+            
+        try:
+            params = {
+                'api_key': self.tmdb_api_key,
+                'query': title,
+                'page': 1
+            }
+            
+            response = self.session.get(self.tmdb_tv_search_url, params=params, timeout=5)
+            data = response.json()
+            
+            if data.get('results'):
+                tv_id = data['results'][0]['id']
+                return f"https://www.themoviedb.org/tv/{tv_id}"
+                
+        except Exception as e:
+            self.log.debug(f"TMDb TV fetch error for '{title}': {e}")
+        return None
+
+    def auto_fetch_url(self, releasename):
+        """Auto-fetch URL for a release name - tries multiple sources"""
+        self.url_fetch_stats['attempted'] += 1
+        
+        parsed = self.parse_release_name(releasename)
+        url = None
+        
+        if parsed['type'] == 'movie':
+            # Try IMDb first (no key needed)
+            url = self.fetch_imdb_url(parsed['title'], parsed.get('year'))
+            
+            # Fallback to TMDb if available and IMDb failed
+            if not url and self.tmdb_api_key:
+                url = self.fetch_tmdb_movie_url(parsed['title'], parsed.get('year'))
+        
+        elif parsed['type'] == 'tv':
+            # For TV, prefer TMDb if available (better TV database)
+            if self.tmdb_api_key:
+                url = self.fetch_tmdb_tv_url(parsed['title'], parsed.get('season'))
+            
+            # Fallback to IMDb TV search (treat as movie search, often works)
+            if not url:
+                url = self.fetch_imdb_url(parsed['title'])
+        
+        else:
+            # Unknown type - try IMDb anyway
+            url = self.fetch_imdb_url(parsed['title'])
+        
+        if url:
+            self.url_fetch_stats['succeeded'] += 1
+            self.log.info(f"✓ Found URL for {releasename}: {url}")
+        else:
+            self.url_fetch_stats['failed'] += 1
+            self.log.debug(f"✗ No URL found for {releasename}")
+        
+        return url
+
+    def _background_url_fetch(self, releasename):
+        """Background task to fetch and update URL after release is announced"""
+        try:
+            # Small delay to not overwhelm APIs
+            time.sleep(2)
+            
+            ### ADD THIS BLOCK START ###
+            # Check if this is a music release - skip URL fetching for music
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT section FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                section_result = cursor.fetchone()
+                if section_result:
+                    section = section_result[0]
+                    skip_sections = {
+                        # MUSIC
+                        'MP3', 'MP3-WEB', 'FLAC', 'FLAC-WEB', 'FLACFR', 
+                        'FLAC-FR', 'ABOOK', 'MVID', 'MViD', 'MDVDR', 'MBLURAY',
+                        # GAMES
+                        'GAMES', 'GAMES-0DAY', 'DC', 'WII', 'PSX', 'PSV', 'PSP',
+                        'PS2', 'PS3', 'PS4', 'PS5', 'GBA', 'GBC', 'NGC', 'NDS', '3DS',
+                        'NSW', 'XBOX', 'XBOX360', 'GAMES-CONSOLE', 'GAMES-NiNTENDO',
+                        # EBOOK
+                        'EBOOK', 'BOOKWARE', 'BOOKWARE-0DAY', 'EBOOK-FOREIGN',
+                        # APPS / VARIOUS
+                        'APPS', '0DAY', 'SPORTS', 'GAMES-DOX', 'APPS-MOBiLE',
+                        # XXX
+                        'XXX'
+                    }                             
+                    if section in skip_sections:
+                        self.log.info(f"Skipping auto URL fetch for {section} release: {releasename}")
+                        return
+            ### ADD THIS BLOCK END ###
+            
+            url = self.auto_fetch_url(releasename)
+            
+            if not url:
+                return  # No URL found, nothing to update
+            
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Double-check URL is still empty before updating
+                cursor.execute(
+                    "SELECT url FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                result = cursor.fetchone()
+                
+                if result:
+                    current_url = result[0]
+                    # Only update if empty or NULL
+                    if not current_url:
+                        cursor.execute(
+                            "UPDATE releases SET url = %s WHERE releasename = %s",
+                            (url, releasename),
+                        )
+                        conn.commit()
+                        self.log.info(f"✓ Background URL updated for {releasename}")
+                        
+                        # ANNOUNCE URL WAS ADDED (reusing your existing method)
+                        # Need to get irc object - try to find it from world.ircs
+                        for irc in world.ircs:
+                            if self._is_irc_connected(irc):
+                                self.announce_url(irc, releasename, url)
+                                break
+                        
+                    else:
+                        self.log.debug(f"URL already exists for {releasename}, skipping")
+                        
+        except Exception as e:
+            self.log.error(f"Background URL fetch error for {releasename}: {e}")
+
+    # ==============
+    # DISCOGS LOOKUP
+    # ==============
+    def _background_discogs_lookup(self, releasename, irc=None):
+        """Background worker for Discogs URL lookup (runs in thread pool)"""
+        try:
+            self.log.info(f"Starting Discogs lookup for: {releasename}")
+            
+            # Pass IRC for announcements
+            url, message = self._process_discogs_lookup(releasename, announce_irc=irc)
+            
+            if url:
+                self.log.info(f"✓ Auto-Discogs SUCCESS: {message} - {url}")
+            else:
+                self.log.warning(f"✗ Auto-Discogs FAILED: {message}")
+        except Exception as e:
+            self.log.error(f"Error in auto Discogs lookup for {releasename}: {e}", exc_info=True)         
+
+    # =================
+    # URL FETCHER STATS
+    # =================
+    def urlfetchstats(self, irc, msg, args):
+            """Show URL fetcher statistics"""
+            stats = self.url_fetch_stats
+            total = stats['attempted']
+            if total > 0:
+                success_rate = (stats['succeeded'] / total) * 100
+                irc.reply(
+                    f"[ URL Fetcher Stats ] "
+                    f"[ Attempted: {stats['attempted']} ] "
+                    f"[ Succeeded: \x0303{stats['succeeded']}\x03 ] "
+                    f"[ Failed: \x0304{stats['failed']}\x03 ] "
+                    f"[ Success Rate: {success_rate:.1f}% ]"
+                )
+            else:
+                irc.reply("[ URL Fetcher Stats ] No fetches attempted yet")
+
+    urlfetchstats = commands.wrap(urlfetchstats, [])
+
+    # ====================
+    # FETCHER MISSING URLS
+    # ====================
+    def fetchmissingurls(self, irc, msg, args, limit=None):
+        """[<limit>] - Manually fetch URLs for releases without them"""
+        if not limit:
+            limit = 10
+        limit = min(max(limit, 1), 50)  # Clamp between 1-50
+        
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT releasename FROM releases 
+                    WHERE url IS NULL OR url = ''
+                    ORDER BY unixtime DESC
+                    LIMIT %s
+                """, (limit,))
+                
+                releases = cursor.fetchall()
+                
+                if not releases:
+                    irc.reply("No releases missing URLs")
+                    return
+                
+                irc.reply(f"Fetching URLs for {len(releases)} releases...")
+                
+                # Submit all to thread pool
+                for (releasename,) in releases:
+                    self.thread_pool.submit(self._background_url_fetch, releasename)
+                    time.sleep(0.5)  # Small delay between submissions
+                
+                irc.reply(f"Queued {len(releases)} URL fetches (background processing)")
+                
+        except Exception as e:
+            self.log.error(f"Fetch missing URLs error: {e}")
+            irc.reply(f"Error: {e}")
+
+    fetchmissingurls = commands.wrap(fetchmissingurls, [optional('int')])    
 
     def _process_command(self, text):
         """Process commands efficiently"""
-        self.log.info(f"Processing command: {text}")
+        # Logging command from above
+        #self.log.info(f"Processing command: {text}")
         
         for cmd_prefix, handler in self.command_handlers.items():
             if text.startswith(cmd_prefix):
@@ -306,21 +828,19 @@ class PreDBSQL(callbacks.Plugin):
 
     @contextlib.contextmanager
     def db_connection(self):
-        """Context manager for MySQL database connections with automatic cleanup"""
+        """Get connection from pool"""
         conn = None
         try:
-            self.log.debug(f"Attempting to connect with config: host={self.db_config['host']}, db={self.db_config['database']}, user={self.db_config['user']}")
-            conn = mysql.connector.connect(**self.db_config)
-            self.log.debug("MySQL connection established successfully")
+            conn = self.connection_pool.get_connection()
             yield conn
-        except Error as e:
-            self.log.error(f"MySQL connection error: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database connection error: {e}")
             if conn:
-                conn.close()
-            raise e
+                conn.rollback()
+            raise
         finally:
             if conn and conn.is_connected():
-                conn.close()
+                conn.close()  # Returns connection to pool
                 self.log.debug("Database connection closed")
 
     # ========================
@@ -328,22 +848,24 @@ class PreDBSQL(callbacks.Plugin):
     # ========================
     @lru_cache(maxsize=100)
     def get_cached_content(self, url):
-        """Cached HTTP GET with proper size enforcement"""
-        if url in self.nfo_cache:
-            # Move to end (most recently used)
-            content = self.nfo_cache.pop(url)
-            self.nfo_cache[url] = content
-            return content
+        """Cached HTTP GET with proper size enforcement and thread-safety"""
+        with self.nfo_cache_lock:
+            if url in self.nfo_cache:
+                # Move to end (most recently used)
+                content = self.nfo_cache.pop(url)
+                self.nfo_cache[url] = content
+                return content
         
         try:
             response = self.session.get(url, timeout=5)
             content = response.text if response.status_code == 200 else None
             
-            # Enforce cache size limit
-            if len(self.nfo_cache) >= self.cache_maxsize:
-                self.nfo_cache.popitem(last=False)  # Remove oldest
-            
-            self.nfo_cache[url] = content
+            with self.nfo_cache_lock:
+                # Enforce cache size limit
+                if len(self.nfo_cache) >= self.cache_maxsize:
+                    self.nfo_cache.popitem(last=False)  # Remove oldest
+                
+                self.nfo_cache[url] = content
             return content
         except Exception:
             return None
@@ -383,16 +905,41 @@ class PreDBSQL(callbacks.Plugin):
         return f"[ \x0305SFV\x03 ]"
 
     def get_srr_from_srrdb(self, releasename):
-        """Cached SRR lookup with timeout"""
+        """Cached SRR lookup with timeout - checks if SRR download exists"""
         url = f"https://www.srrdb.com/download/srr/{releasename}"
-        content = self.get_cached_content(url)
         
-        # For SRR, we just need to check if the URL exists (returns 200)
-        if content is not None:  # content will be None if request failed or not 200
-            shortened = self.shorten_url(url)
-            return f"[ \x033SRR\x03: {shortened} ] "
-        return f"[ \x0305SRR\x03 ]"
-
+        # Check cache first (thread-safe)
+        with self.srr_cache_lock:
+            if url in self.srr_cache:
+                # Move to end (most recently used)
+                exists = self.srr_cache.pop(url)
+                self.srr_cache[url] = exists
+                if exists:
+                    shortened = self.shorten_url(url)
+                    return f"[ \x033SRR\x03: {shortened} ] "
+                return f"[ \x0305SRR\x03 ]"
+        
+        # Make HEAD request to check if SRR exists without downloading
+        try:
+            response = self.session.head(url, timeout=5, allow_redirects=True)
+            exists = response.status_code == 200
+            
+            with self.srr_cache_lock:
+                # Enforce cache size limit
+                if len(self.srr_cache) >= self.cache_maxsize:
+                    self.srr_cache.popitem(last=False)  # Remove oldest
+                
+                self.srr_cache[url] = exists
+            
+            if exists:
+                shortened = self.shorten_url(url)
+                return f"[ \x033SRR\x03: {shortened} ] "
+            return f"[ \x0305SRR\x03 ]"
+            
+        except Exception as e:
+            self.log.error(f"Error checking SRR: {e}")
+            return f"[ \x0305SRR\x03 ]"
+        
     def get_all_links(self, releasename):
         """Get all links in parallel using cached functions"""
         with ThreadPoolExecutor() as executor:
@@ -590,7 +1137,8 @@ class PreDBSQL(callbacks.Plugin):
 
     # ===============
     # CHANGE UNIXTIME
-    # ===============  
+    # ===============
+    @admin_only
     def unixtime(self, irc, msg, args):
         """Update the unixtime for a specific release in the database.
         
@@ -633,11 +1181,6 @@ class PreDBSQL(callbacks.Plugin):
         Returns:
             None - sends replies directly via IRC connection
         """
-        # Security: Check if the user is 'klapvogn'
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
-
         if len(args) < 2:
             irc.reply("Usage: +unixtime <releasename> <unixtime>")
             return
@@ -670,13 +1213,16 @@ class PreDBSQL(callbacks.Plugin):
         except Error as e:
             self.log.error(f"MySQL database error during unixtime change: {e}")
             irc.reply(f"Error during unixtime change: {e}")
-        except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     # ==============
     # CHANGE SECTION
     # ==============  
+    @admin_only
     def chgsec(self, irc, msg, args):
         """Update the section for a specific release in the database.
         
@@ -713,11 +1259,6 @@ class PreDBSQL(callbacks.Plugin):
             - Database changes are committed only if the update affects rows
             - The release name must match exactly (case-sensitive)
         """
-        # Security: Check if the user is 'klapvogn'
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
-
         if len(args) < 2:
             irc.reply("Usage: !chgsec <releasename> <new_section>")
             return
@@ -741,9 +1282,11 @@ class PreDBSQL(callbacks.Plugin):
         except Error as e:
             self.log.error(f"MySQL database error during section change: {e}")
             irc.reply(f"Error during section change: {e}")
-        except Exception as e:
-            self.log.error(f"Unexpected error: {e}")
-            irc.reply(f"Unexpected error: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     # ===
     # Pre
@@ -848,9 +1391,11 @@ class PreDBSQL(callbacks.Plugin):
             )
             irc.reply(message)
 
-        except Exception as e:
-            self.log.error(f"Error in pre: {e}")
-            irc.reply(f"Error retrieving pre data: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
     pre = commands.wrap(pre, ['text'])
 
     # ====
@@ -965,9 +1510,11 @@ class PreDBSQL(callbacks.Plugin):
             for msg in messages:
                 irc.reply(msg, private=True)
 
-        except Exception as e:
-            self.log.error(f"Error during dupe search: {e}")
-            irc.reply(f"Error during dupe search: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     dupe = commands.wrap(dupe, ['text'])
 
@@ -1066,9 +1613,11 @@ class PreDBSQL(callbacks.Plugin):
                 if last_release:
                     irc.reply(f"\x033[ LAST RELEASE\x03 ] {last_release} pred [ {last_time_fmt} ]")
 
-        except Exception as e:
-            self.log.error(f"Error in group: {e}")
-            irc.reply(f"Error retrieving group data: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
     group = commands.wrap(group, ['text'])
 
 # ========
@@ -1148,9 +1697,11 @@ class PreDBSQL(callbacks.Plugin):
                 f"[ \x0305NUKED\x03 ] [ {releasename} ] pred [ {time_ago} / {pretime_colored} ] "
                 f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
             )
-        except Exception as e:
-            self.log.error(f"Error in lastnuke: {e}")
-            irc.reply(f"Error retrieving last nuke: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
 # ==========
 # LASTUNNUKE
@@ -1241,9 +1792,11 @@ class PreDBSQL(callbacks.Plugin):
                 f"in [ {section_formatted} ] [ \x0303{reason or 'Unknown reason'}\x03 => \x0303{nukenet or 'Unknown network'}\x03 ]"
             )
             
-        except Exception as e:
-            self.log.error(f"Error in lastunnuke: {e}")
-            irc.reply(f"Error retrieving unnuke data: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
 # ===========
 # LASTMODNUKE
@@ -1339,9 +1892,11 @@ class PreDBSQL(callbacks.Plugin):
                 f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown network'}\x03 ]"
             )
             
-        except Exception as e:
-            self.log.error(f"Error in lastmodnuke: {e}")
-            irc.reply(f"Error retrieving unnuke data: {str(e)}")            
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")           
 
 # ===========
 # LASTDELPRE
@@ -1437,9 +1992,11 @@ class PreDBSQL(callbacks.Plugin):
                 f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown'}\x03 ]"
             )
             
-        except Exception as e:
-            self.log.error(f"Error in lastmodnuke: {e}")
-            irc.reply(f"Error retrieving unnuke data: {str(e)}") 
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
 # ============
 # LASTUNDELPRE
@@ -1535,9 +2092,11 @@ class PreDBSQL(callbacks.Plugin):
                 f"in [ {section_formatted} ] [ \x0305{reason or 'Unknown reason'}\x03 => \x0305{nukenet or 'Unknown'}\x03 ]"
             )
             
-        except Exception as e:
-            self.log.error(f"Error in lastmodnuke: {e}")
-            irc.reply(f"Error retrieving unnuke data: {str(e)}") 
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     # =======
     # SECTION
@@ -1630,9 +2189,11 @@ class PreDBSQL(callbacks.Plugin):
             for message in messages:
                 irc.reply(message, private=True)
 
-        except Exception as e:
-            self.log.error(f"Error in section: {e}")
-            irc.reply(f"Error retrieving section data: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
     section = commands.wrap(section, ['text'])
 
     def _check_and_process_pending_url_sync(self, conn, releasename):
@@ -1798,6 +2359,15 @@ class PreDBSQL(callbacks.Plugin):
                 attempt_count = pending_entry['attempt_count']
                 max_attempts = pending_entry['max_attempts']
                 retry_delay = pending_entry['retry_delay']
+                timestamp = pending_entry.get('timestamp', time.time())  # Fallback to current time if missing
+                
+                # Check if entry has expired (TTL: 24 hours = 86400 seconds)
+                age = time.time() - timestamp
+                if age > 86400:  # 24 hours
+                    self.log.warning(f"TTL expired for {releasename} (age: {age:.0f}s), removing from queue")
+                    self.url_stats['failed'] += 1
+                    self._remove_from_pending_db(releasename)
+                    continue
                 
                 # Check if we should retry
                 if attempt_count >= max_attempts:
@@ -1955,14 +2525,10 @@ class PreDBSQL(callbacks.Plugin):
             self.log.error(f"Error in pendingurls: {e}")
             irc.reply(f"Error retrieving pending URLs: {str(e)}")
 
+    @admin_only
     def processpendingurls(self, irc, msg, args):
             """Manually process all pending URLs and match with existing releases"""
-            
-            # Security check
-            if msg.nick != 'klapvogn':
-                irc.reply("Error: You do not have permission to use this command.")
-                return
-            
+                      
             try:
                 with self.db_connection() as conn:
                     cursor = conn.cursor()
@@ -2031,21 +2597,19 @@ class PreDBSQL(callbacks.Plugin):
                     )
                     irc.reply(message)
                     
-            except Exception as e:
-                self.log.error(f"Error in processpendingurls: {e}")
-                irc.reply(f"Error processing pending URLs: {str(e)}")
+            except mysql.connector.Error as e:
+                self.log.error(f"Database error {e.errno}: {e.msg}")
+                irc.reply("Database error occurred")
+            except ValueError as e:
+                irc.reply(f"Invalid input: {e}")
         
     processpendingurls = commands.wrap(processpendingurls, [])
 
 
     # Optional: Version with detailed output
+    @admin_only
     def processpendingurlsverbose(self, irc, msg, args):
         """Manually process all pending URLs with detailed output"""
-        
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
         
         try:
             with self.db_connection() as conn:
@@ -2126,22 +2690,20 @@ class PreDBSQL(callbacks.Plugin):
                 )
                 irc.reply(message)
                 
-        except Exception as e:
-            self.log.error(f"Error in processpendingurlsverbose: {e}")
-            irc.reply(f"Error processing pending URLs: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
     
     processpendingurlsverbose = commands.wrap(processpendingurlsverbose, [])
 
 
     # Optional: Process a single pending URL by releasename
+    @admin_only
     def processpendingurl(self, irc, msg, args, releasename):
         """<releasename> - Process a specific pending URL"""
-        
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
-        
+
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
@@ -2192,9 +2754,11 @@ class PreDBSQL(callbacks.Plugin):
                 else:
                     irc.reply(f"Release not found in database: {releasename}")
                     
-        except Exception as e:
-            self.log.error(f"Error in processpendingurl: {e}")
-            irc.reply(f"Error processing pending URL: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
     
     processpendingurl = commands.wrap(processpendingurl, ['text'])            
 
@@ -2222,10 +2786,9 @@ class PreDBSQL(callbacks.Plugin):
     # ========================
     # BACKGROUND TASK HANDLING
     # ========================
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addpre(self, irc, msg, args):
         """Threadpool-based addpre handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
             
         if len(args) < 2:
             irc.reply("Usage: !addpre <releasename> <section>")
@@ -2238,6 +2801,7 @@ class PreDBSQL(callbacks.Plugin):
         self.thread_pool.submit(self._addpre_thread, irc, releasename, section, group)
 
     def _addpre_thread(self, irc, releasename, section, group):
+        """Fast addpre with background URL fetching"""
         try:
             self.log.debug(f"Starting _addpre_thread for: {releasename}")
             
@@ -2245,6 +2809,8 @@ class PreDBSQL(callbacks.Plugin):
                 self.log.debug("Database connection successful")
                 
                 cursor = conn.cursor()
+                
+                # FAST INSERT - no URL yet (url column will be NULL)
                 cursor.execute(
                     "INSERT IGNORE INTO releases (releasename, section, grp) VALUES (%s, %s, %s)",
                     (releasename, section, group),
@@ -2254,13 +2820,24 @@ class PreDBSQL(callbacks.Plugin):
                 if cursor.rowcount > 0:
                     self.log.debug("New release, announcing...")
                     
-                    # Process pending URL immediately in same transaction
+                    # Process any pending URLs from old !addurl queue
                     self._check_and_process_pending_url_sync(conn, releasename)
                     
+                    # Announce immediately (fast - no API delay)
                     self.announce_pre(irc, releasename, section)
+                    
+                    # Fetch URL in background (non-blocking)
+                    self.thread_pool.submit(self._background_url_fetch, releasename)
+                    self.log.debug(f"Background URL fetch queued for {releasename}")
+                    
+                    # AUTO-DISCOGS: Lookup Discogs URL for music releases (using thread pool)
+                    if self.registryValue('autoDiscogs') and section in self.MUSIC_SECTIONS:
+                        # PASS IRC OBJECT for announcements
+                        self.thread_pool.submit(self._background_discogs_lookup, releasename, irc)
+                        self.log.debug(f"Auto-Discogs lookup queued for {releasename}")
+                    
                 else:
                     self.log.debug("Release already exists")
-                    irc.reply(f"Release '{releasename}' already exists")
                     
         except Exception as e:
             self.log.error(f"Addpre error: {repr(e)}")
@@ -2268,10 +2845,9 @@ class PreDBSQL(callbacks.Plugin):
     # ========
     # ADDGENRE
     # ========
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addgenre(self, irc, msg, args):
         """Threadpool-based genre handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn", "Bette"]:
-            return
         
         if len(args) < 2:
             irc.reply("Usage: !gn <releasename> <genre>")
@@ -2291,50 +2867,24 @@ class PreDBSQL(callbacks.Plugin):
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
-                
-                # Atomic update: only update if genre is NULL or empty
                 cursor.execute(
-                    """
-                    UPDATE releases 
-                    SET genre = %s 
-                    WHERE releasename = %s 
-                    AND (genre IS NULL OR genre = '' OR TRIM(genre) = '')
-                    """,
+                    "UPDATE releases SET genre = %s WHERE releasename = %s",
                     (genre, releasename),
                 )
                 conn.commit()
                 
-                if cursor.rowcount > 0:
-                    self.log.info(f"Updated genre for {releasename} to {genre}")
-                    irc.reply(f"Genre updated: {releasename} → {genre}")
-                else:
-                    # Check why it failed - release doesn't exist or genre already set
-                    cursor.execute(
-                        "SELECT releasename, genre FROM releases WHERE releasename = %s",
-                        (releasename,)
-                    )
-                    existing = cursor.fetchone()
-                    
-                    if not existing:
-                        self.log.warning(f"No release found with name: {releasename}")
-                        # Uncomment if you want to notify about missing releases
-                        # irc.reply(f"Release not found: {releasename}")
-                    else:
-                        current_genre = existing[1]
-                        self.log.info(f"Genre already exists for {releasename}: {current_genre}")
-                        irc.reply(f"Genre already set: {releasename} → {current_genre}")
-                        
+            # Announce to channel after successful DB update
+            self.announce_genre(irc, releasename, genre)
+                
         except Exception as e:
-            self.log.error(f"Addgenre error: {e}", exc_info=True)
-            irc.reply(f"Error updating genre: {str(e)}")       
+            self.log.error(f"Addgenre error: {e}")      
 
     # =======
     # ADDURL
     # =======
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addurl(self, irc, msg, args):
         """Threadpool-based URL handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn", "Bette"]:
-            return
         
         if len(args) < 2:
             irc.reply("Usage: !addurl <releasename> <url>")
@@ -2344,7 +2894,7 @@ class PreDBSQL(callbacks.Plugin):
         url = args[1]
         
         # Log what we're processing
-        self.log.info(f"Processing !addurl command: release='{releasename}', url='{url}'")
+        #self.log.info(f"Processing !addurl command: release='{releasename}', url='{url}'")
         
         # Submit to thread pool
         self.thread_pool.submit(self._addurl_thread, irc, releasename, url)
@@ -2378,13 +2928,11 @@ class PreDBSQL(callbacks.Plugin):
                             (url, time.time(), releasename)
                         )
                         conn.commit()
-                        irc.reply(f"Release {releasename} already queued - updated URL and reset retry counter")
+                        self.log.info(f"Release {releasename} already queued - updated URL")
                         return
                     
                     # Not queued yet - add to queue
                     self.url_stats['queued'] += 1
-
-                    # Create pending entry
                     pending_entry = {
                         'releasename': releasename,
                         'url': url,
@@ -2397,53 +2945,54 @@ class PreDBSQL(callbacks.Plugin):
                     # Add to database-persisted queue
                     if self._add_to_pending_queue_db(pending_entry):
                         self.log.info(f"Queued URL for later processing: {releasename}")
-                        irc.reply(f"Release {releasename} not found - URL queued for later processing")
                     else:
-                        irc.reply(f"Error queuing URL for {releasename}")
+                        self.log.error(f"Error queuing URL for {releasename}")
                     return
                 
-                # Release exists - update it directly
+                ### ADD THIS BLOCK START ###
+                # Check if this is a music release - skip URL addition for music
+                cursor.execute(
+                    "SELECT section FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                section_result = cursor.fetchone()
+                if section_result:
+                    section = section_result[0]
+                    music_sections = {
+                        'MP3', 'MP3-WEB', 'FLAC', 'FLAC-WEB', 'FLACFR', 
+                        'FLAC-FR', 'ABOOK', 'MVID', 'MViD', 'MDVDR', 'MBLURAY'
+                    }
+                    if section in music_sections:
+                        self.log.info(f"Skipping URL addition for music release: {releasename} (section: {section})")
+                        return
+                ### ADD THIS BLOCK END ###
+                
+                # Release exists and is not music - update it directly
                 cursor.execute(
                     "UPDATE releases SET url = %s WHERE releasename = %s",
                     (url, releasename),
                 )
                 conn.commit()
                 
-                if cursor.rowcount > 0:
-                    self.log.info(f"Updated URL for {releasename} to {url}")
-
-                    # Track immediate success
-                    self.url_stats['immediate_success'] += 1                    
-                    
-                    # Clean up from pending cache/db if it was there
-                    self._remove_from_pending_db(releasename)
-                        
-                    irc.reply(f"URL updated: {releasename} → {url}")
-                else:
-                    # Check if URL is already the same
-                    cursor.execute(
-                        "SELECT url FROM releases WHERE releasename = %s",
-                        (releasename,)
-                    )
-                    current_url = cursor.fetchone()
-                    if current_url and current_url[0] == url:
-                        irc.reply(f"URL already set: {releasename} → {url}")
-                    else:
-                        self.log.warning(f"URL Update failed for: {releasename}")
-                        irc.reply(f"URL already set: {releasename}")
+                # Track immediate success
+                self.url_stats['immediate_success'] += 1                    
+                
+                # Clean up from pending cache/db if it was there
+                self._remove_from_pending_db(releasename)
+                
+                # Announce to channel after successful DB update
+                self.announce_url(irc, releasename, url)
                         
         except Exception as e:
-            self.log.error(f"Addurl error: {e}", exc_info=True)
-            irc.reply(f"Error updating URL: {str(e)}")
+            self.log.error(f"Addurl error: {e}")
 
     # =======
     # ADDNUKE
     # =======
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addnuke(self, irc, msg, args):
         """Threadpool-based nuke handler"""
         try:
-            if msg.nick not in ["CTW_PRE", "klapvogn"]:
-                return
                 
             if len(args) < 3:
                 irc.reply("Usage: !nuke <releasename> <reason> <nukenet>")
@@ -2458,65 +3007,27 @@ class PreDBSQL(callbacks.Plugin):
             # Submit to thread pool
             self.thread_pool.submit(self._nuke_thread, irc, releasename, reason, nukenet)
             
-        except Exception as e:
-            self.log.error(f"Error in handle_addnuke: {e}")
-            irc.reply(f"Error processing nuke command: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     # ==========================================================
     # Add nukes that is not in database to an new_nukes database
     # ==========================================================
     def _nuke_thread(self, irc, releasename, reason, nukenet):
-            """Enhanced nuke handler - adds to new_nukes if not in main database"""
-            try:
-                with self.db_connection() as conn:
-                    cursor = conn.cursor()
-
-                    # Check if release exists in main releases table
-                    cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
-                    result = cursor.fetchone()
-
-                    if result:
-                        # Release exists - update it
-                        if result[0] == 1:
-                            irc.reply(f"Release {releasename} is already nuked.")
-                            return
-
-                        cursor.execute(
-                            "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
-                            (1, reason, nukenet, releasename),
-                        )
-                        conn.commit()
-
-                        if cursor.rowcount > 0:
-                            self.announce_nuke_status(irc, releasename, reason, nukenet, 1)
-                    else:
-                        # Release not found - add to new_nukes instead
-                        group = releasename.split('-')[-1] if '-' in releasename else None
-                        
-                        try:
-                            cursor.execute(
-                                "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, 1)",
-                                (releasename, reason, nukenet, group),
-                            )
-                            conn.commit()
-                            irc.reply(f"Release {releasename} not in database - added to pending nukes. Use +newnukes to review.")
-                        except Exception as e:
-                            irc.reply(f"Release {releasename} already in pending nukes")
-                            self.log.error(f"Error adding to new_nukes: {e}")
-
-            except Exception as e:
-                self.log.error(f"Nuke error: {e}")
-                irc.reply(f"Error processing nuke: {str(e)}")
+        """Nuke handler"""
+        self._dispatch_nuke_thread(irc, 'nuke', releasename, reason, nukenet)
 
     # =======
     # DELPRE
     # =======
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_adddelpre(self, irc, msg, args):
         """Threadpool-based delpre handler"""
         try:
-            if msg.nick not in ["CTW_PRE", "klapvogn"]:
-                return
-                
+
             if len(args) < 3:
                 irc.reply("Usage: !delpre <releasename> <reason> <nukenet>")
                 return
@@ -2530,63 +3041,25 @@ class PreDBSQL(callbacks.Plugin):
             # Submit to thread pool
             self.thread_pool.submit(self._delpre_thread, irc, releasename, reason, nukenet)
             
-        except Exception as e:
-            self.log.error(f"Error in handle_adddelpre: {e}")
-            irc.reply(f"Error processing delpre command: {e}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     # ==========================================================
     # Add nukes that is not in database to an new_nukes database
     # ==========================================================
     def _delpre_thread(self, irc, releasename, reason, nukenet):
-            """Enhanced nuke handler - adds to new_nukes if not in main database"""
-            try:
-                with self.db_connection() as conn:
-                    cursor = conn.cursor()
-
-                    # Check if release exists in main releases table
-                    cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
-                    result = cursor.fetchone()
-
-                    if result:
-                        # Release exists - update it
-                        if result[0] == 1:
-                            irc.reply(f"Release {releasename} is already nuked.")
-                            return
-
-                        cursor.execute(
-                            "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
-                            (1, reason, nukenet, releasename),
-                        )
-                        conn.commit()
-
-                        if cursor.rowcount > 0:
-                            self.announce_nuke_status(irc, releasename, reason, nukenet, 4)
-                    else:
-                        # Release not found - add to new_nukes instead
-                        group = releasename.split('-')[-1] if '-' in releasename else None
-                        
-                        try:
-                            cursor.execute(
-                                "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, 4)",
-                                (releasename, reason, nukenet, group),
-                            )
-                            conn.commit()
-                            irc.reply(f"Release {releasename} not in database - added to pending nukes. Use +newnukes to review.")
-                        except Exception as e:
-                            irc.reply(f"Release {releasename} already in pending nukes")
-                            self.log.error(f"Error adding to new_nukes: {e}")
-
-            except Exception as e:
-                self.log.error(f"Delpre error: {e}")
-                irc.reply(f"Error processing nuke: {str(e)}") 
+        """Delpre handler"""
+        self._dispatch_nuke_thread(irc, 'delpre', releasename, reason, nukenet)
 
     # =========
     # UNDELPRE
     # =========
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addundelpre(self, irc, msg, args):
         """Threadpool-based undelpre handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
             
         if len(args) < 3:
             irc.reply("Usage: !undelpre <releasename> <reason> <nukenet>")
@@ -2603,55 +3076,15 @@ class PreDBSQL(callbacks.Plugin):
     # Add unnukes that is not in database to an new_nukes database
     # ==========================================================
     def _undelpre_thread(self, irc, releasename, reason, nukenet):
-        """Enhanced undelpre handler - adds to new_nukes if not in main database"""
-        try:
-            with self.db_connection() as conn:
-                cursor = conn.cursor()
-
-                # Check if release exists in main releases table
-                cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
-                result = cursor.fetchone()
-
-                if result:
-                    # Release exists - update it
-                    if result[0] == 2:
-                        irc.reply(f"Release {releasename} is already unnuked.")
-                        return
-
-                    cursor.execute(
-                        "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
-                        (2, reason, nukenet, releasename),
-                    )
-                    conn.commit()
-
-                    if cursor.rowcount > 0:
-                        self.announce_nuke_status(irc, releasename, reason, nukenet, 5)
-                else:
-                    # Release not found - add to new_nukes instead
-                    group = releasename.split('-')[-1] if '-' in releasename else None
-                    
-                    try:
-                        cursor.execute(
-                            "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, 5)",
-                            (releasename, reason, nukenet, group),
-                        )
-                        conn.commit()
-                        irc.reply(f"Release {releasename} not in database - added to pending unnukes. Use +newunnukes to review.")
-                    except Exception as e:
-                        irc.reply(f"Release {releasename} already in pending undelpre")
-                        self.log.error(f"Error adding to new_nukes: {e}")
-
-        except Exception as e:
-            self.log.error(f"Unnuke error: {e}")
-            irc.reply(f"Error processing undelpre: {str(e)}")                               
+        """Undelpre handler"""
+        self._dispatch_nuke_thread(irc, 'undelpre', releasename, reason, nukenet)                            
 
     # =========
     # ADDUNNUKE
     # =========
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addunnuke(self, irc, msg, args):
         """Threadpool-based unnuke handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
             
         if len(args) < 3:
             irc.reply("Usage: !unnuke <releasename> <reason> <nukenet>")
@@ -2668,55 +3101,15 @@ class PreDBSQL(callbacks.Plugin):
     # Add unnukes that is not in database to an new_nukes database
     # ==========================================================
     def _unnuke_thread(self, irc, releasename, reason, nukenet):
-        """Enhanced unnuke handler - adds to new_nukes if not in main database"""
-        try:
-            with self.db_connection() as conn:
-                cursor = conn.cursor()
-
-                # Check if release exists in main releases table
-                cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
-                result = cursor.fetchone()
-
-                if result:
-                    # Release exists - update it
-                    if result[0] == 2:
-                        irc.reply(f"Release {releasename} is already unnuked.")
-                        return
-
-                    cursor.execute(
-                        "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
-                        (2, reason, nukenet, releasename),
-                    )
-                    conn.commit()
-
-                    if cursor.rowcount > 0:
-                        self.announce_nuke_status(irc, releasename, reason, nukenet, 2)
-                else:
-                    # Release not found - add to new_nukes instead
-                    group = releasename.split('-')[-1] if '-' in releasename else None
-                    
-                    try:
-                        cursor.execute(
-                            "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, 2)",
-                            (releasename, reason, nukenet, group),
-                        )
-                        conn.commit()
-                        irc.reply(f"Release {releasename} not in database - added to pending unnukes. Use +newunnukes to review.")
-                    except Exception as e:
-                        irc.reply(f"Release {releasename} already in pending unnukes")
-                        self.log.error(f"Error adding to new_nukes: {e}")
-
-        except Exception as e:
-            self.log.error(f"Unnuke error: {e}")
-            irc.reply(f"Error processing unnuke: {str(e)}")
+        """Unnuke handler"""
+        self._dispatch_nuke_thread(irc, 'unnuke', releasename, reason, nukenet)
 
     # =======
     # MODNUKE
     # =======
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addmodnuke(self, irc, msg, args):
         """Threadpool-based modnuke handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
             
         if len(args) < 3:
             irc.reply("Usage: !modnuke <releasename> <reason> <nukenet>")
@@ -2733,55 +3126,15 @@ class PreDBSQL(callbacks.Plugin):
     # Add modnukes that is not in database to an new_nukes database
     # ==========================================================
     def _modnuke_thread(self, irc, releasename, reason, nukenet):
-            """Enhanced modnuke handler - adds to new_nukes if not in main database"""
-            try:
-                with self.db_connection() as conn:
-                    cursor = conn.cursor()
-
-                    # Check if release exists in main releases table
-                    cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
-                    result = cursor.fetchone()
-
-                    if result:
-                        # Release exists - update it
-                        if result[0] == 1:
-                            irc.reply(f"Release {releasename} is already nuked.")
-                            return
-
-                        cursor.execute(
-                            "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
-                            (1, reason, nukenet, releasename),
-                        )
-                        conn.commit()
-
-                        if cursor.rowcount > 0:
-                            self.announce_nuke_status(irc, releasename, reason, nukenet, 3)
-                    else:
-                        # Release not found - add to new_nukes instead
-                        group = releasename.split('-')[-1] if '-' in releasename else None
-                        
-                        try:
-                            cursor.execute(
-                                "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, 3)",
-                                (releasename, reason, nukenet, group),
-                            )
-                            conn.commit()
-                            irc.reply(f"Release {releasename} not in database - added to pending nukes. Use +newmodnukes to review.")
-                        except Exception as e:
-                            irc.reply(f"Release {releasename} already in pending modnukes")
-                            self.log.error(f"Error adding to new_nukes: {e}")
-
-            except Exception as e:
-                self.log.error(f"Modnuke error: {e}")
-                irc.reply(f"Error processing modnuke: {str(e)}")
+        """Modnuke handler"""
+        self._dispatch_nuke_thread(irc, 'modnuke', releasename, reason, nukenet)
 
     # =======
     # ADDINFO
     # =======
+    @authorized_only(["CTW_PRE", "klapvogn"])
     def handle_addinfo(self, irc, msg, args):
         """Threadpool-based info handler"""
-        if msg.nick not in ["CTW_PRE", "klapvogn"]:
-            return
             
         if len(args) < 3:
             irc.reply("Usage: !info <releasename> <files> <size>")
@@ -2801,19 +3154,23 @@ class PreDBSQL(callbacks.Plugin):
                     (files, size, releasename),
                 )
                 conn.commit()
-
+                
+            # Announce to channel after successful DB update
+            self.announce_info(irc, releasename, files, size)
+                
         except Exception as e:
             self.log.error(f"Addinfo error: {e}")
 
-    # ========================
-    # ANNOUNCEMENTS TO CHANNEL
-    # ========================
+    # =======================
+    # ANNOUNCE PRE TO CHANNEL
+    # =======================
     def announce_pre(self, irc, releasename, section):
         """Announce new release to the #omgwtfnzbs.pre channel on another network."""
         #self.log.info(f"Announcing release: {section} {releasename}")
         # Define the target channel
         #target_channel = "#bot"
-        target_channel = "#omgwtfnzbs.pre"
+        #target_channel = "#omgwtfnzbs.pre"
+        target_channel = self.registryValue('PreannounceChannel')
 
         # Lookup the section color
         section_formatted = self.section_colors.get(section, section)
@@ -2828,6 +3185,71 @@ class PreDBSQL(callbacks.Plugin):
         else:
             self.log.error("Target network omg is not connected. Cannot announce release.")
 
+    # ========================
+    # ANNOUNCE INFO TO CHANNEL
+    # ========================    
+    def announce_info(self, irc, releasename, files, size):
+        """Announce info update to the #omgwtfnzbs.info channel on another network."""
+        #target_channel = "#omgwtfnzbs.info"
+        target_channel = self.registryValue('InfoannounceChannel')
+
+        # Get cached IRC state
+        irc_state = self._get_target_irc_state()
+        
+        if irc_state:
+            # Format the announcement
+            announcement = f"[ {releasename} ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
+            
+            # Send the info line
+            info_line = f"[\x033 ADDED.INFO\x03: {size} \x033MB\x03, {files} \x033Files\x03 ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, info_line))
+        else:
+            self.log.error("Target network omg is not connected. Cannot announce info.")            
+
+    # =========================
+    # ANNOUNCE GENRE TO CHANNEL
+    # =========================
+    def announce_genre(self, irc, releasename, genre):
+        """Announce genre update to the #omgwtfnzbs.info channel on another network."""
+        #target_channel = "#omgwtfnzbs.info"
+        target_channel = self.registryValue('InfoannounceChannel')
+
+        # Get cached IRC state
+        irc_state = self._get_target_irc_state()
+        
+        if irc_state:
+            # Format the announcement
+            announcement = f"[ {releasename} ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
+            
+            # Send the genre line
+            genre_line = f"[ \x033ADDED GENRE\x03: {genre} ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, genre_line))
+        else:
+            self.log.error("Target network omg is not connected. Cannot announce genre.")
+
+    # =========================
+    # ANNOUNCE URL TO CHANNEL
+    # =========================
+    def announce_url(self, irc, releasename, url):
+        """Announce URL update to the #omgwtfnzbs.info channel on another network."""
+        #target_channel = "#omgwtfnzbs.info"
+        target_channel = self.registryValue('InfoannounceChannel')
+
+        # Get cached IRC state
+        irc_state = self._get_target_irc_state()
+        
+        if irc_state:
+            # Format the announcement
+            announcement = f"[ {releasename} ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
+            
+            # Send the URL line
+            url_line = f"[ \x033ADDED.URL\x03: {url} ]"
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, url_line))
+        else:
+            self.log.error("Target network omg is not connected. Cannot announce URL.")            
     # =====================
     # UNIFIED ANNOUNCEMENTS
     # =====================
@@ -2837,8 +3259,8 @@ class PreDBSQL(callbacks.Plugin):
             '1': ("\x0304NUKE\x03", "\x0304"),
             '2': ("\x0303UNNUKE\x03", "\x0303"),
             '3': ("\x0305MODNUKE\x03", "\x0305"),
-            '4': ("\x03035DELPRE\x03", "\x0305"),
-            '5': ("\x03045UNDELPRE\x03", "\x0304")
+            '4': ("\x03055DELPRE\x03", "\x0305"),
+            '5': ("\x0305UNDELPRE\x03", "\x0305")
         }
         
         # Convert nuke_type to string for dictionary lookup
@@ -2848,8 +3270,8 @@ class PreDBSQL(callbacks.Plugin):
         announcement = f"[ \x03{color}{name}\x03 ] {releasename} [ \x03{color}{reason}\x03 ] => \x03{color}{nukenet}\x03"
         
         if irc_state := self._get_target_irc_state():
-            #irc_state.queueMsg(ircmsgs.privmsg("#bot", announcement))
-            irc_state.queueMsg(ircmsgs.privmsg("#omgwtfnzbs.pre", announcement))
+            target_channel = self.registryValue('PreannounceChannel')
+            irc_state.queueMsg(ircmsgs.privmsg(target_channel, announcement))
 
     # Update nuke handlers to use this unified method:
     # - In _nuke_thread: self.announce_nuke_status(irc, releasename, reason, nukenet, 1)
@@ -2864,7 +3286,8 @@ class PreDBSQL(callbacks.Plugin):
         text = msg.args[1]
         channel = msg.args[0]
         
-        self.log.info(f"DEBUG: Received message in {channel}: {text}")
+        # Logging
+        #self.log.info(f"DEBUG: Received message in {channel}: {text}")
         
         # Store for command handlers
         self.irc = irc
@@ -3003,11 +3426,11 @@ class PreDBSQL(callbacks.Plugin):
                             return
 
                         nuke_id_val, releasename, reason, nukenet, unixtime, section, grp, files, size = result
-                        time_ago = self.format_time_ago(unixtime)
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
                         
                         message = (
                             f"[ \x0305PENDING NUKE\x03 ] ID: {nuke_id_val} | {releasename} | "
-                            f"Reason: {reason} | Network: {nukenet} | Time: {time_ago}"
+                            f"Reason: {reason} | Network: {nukenet} | Time: {unixtime}"  # CHANGED: {time_ago} to {unixtime}
                         )
                         irc.reply(message, private=True)
                     except ValueError:
@@ -3029,111 +3452,154 @@ class PreDBSQL(callbacks.Plugin):
                     irc.reply(f"Sending {len(results)} pending nukes to {msg.nick}")
                     
                     for nuke_id, releasename, reason, nukenet, unixtime in results:
-                        time_ago = self.format_time_ago(unixtime)
-                        message = f"[ ID: {nuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Time: {time_ago} ]"
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
+                        message = f"[ ID: {nuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Unixtime: {unixtime} ]"  # CHANGED: {time_ago} to {unixtime}
                         irc.reply(message, private=True)
 
-        except Exception as e:
-            self.log.error(f"Error in newnukes: {e}")
-            irc.reply(f"Error retrieving pending nukes: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     newnukes = commands.wrap(newnukes, [optional('text')])
 
     # ===============================================================================
     # Use this to convert timestamp to unix timestamp https://www.epochconverter.com/
-    # ================================================================================
+    # ===============================================================================
+    @admin_only
     def movenuke(self, irc, msg, args):
         """<id> <unixtime> [<section>] - Move a pending nuke to main database with timestamp"""
         
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
+        params, error = self._validate_move_args(args, '1')
+        if error:
+            irc.reply(error)
             return
 
-        # Parse arguments from rest (args is a list)
-        parts = args if isinstance(args, list) else args.split()
-        
-        if len(parts) < 2:
-            irc.reply("Usage: +movenuke <id> <unixtime> [<section>]")
-            return
-
-        try:
-            nuke_id = int(parts[0])
-            new_unixtime = int(parts[1])
-            section = ' '.join(parts[2:]) if len(parts) > 2 else None
-        except ValueError:
-            irc.reply("ID and unixtime must be integers")
-            return
+        nuke_id = params['id']
+        new_unixtime = params['unixtime']
+        section = params['section']
 
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
 
-                # Fetch the pending nuke
+                # Verify the pending nuke exists and is correct type
                 cursor.execute("""
-                    SELECT releasename, reason, nukenet, grp
+                    SELECT releasename, reason, nukenet, grp, nuked
                     FROM new_nukes
-                    WHERE id = ?
+                    WHERE id = %s
                 """, (nuke_id,))
                 result = cursor.fetchone()
 
                 if not result:
-                    irc.reply(f"Pending nuke ID {nuke_id} not found")
+                    irc.reply(f"Error: Pending nuke ID {nuke_id} not found")
                     return
 
-                releasename, reason, nukenet, grp = result
+                releasename, reason, nukenet, grp, nuked_type = result
+                
+                # Verify correct type
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {nuke_id} is a {actual_type}, not a nuke. Use +move{actual_type} instead.")
+                    return
+
+                # Check if release already exists in main database
+                cursor.execute("SELECT releasename FROM releases WHERE releasename = %s", (releasename,))
+                if cursor.fetchone():
+                    irc.reply(f"Error: Release '{releasename}' already exists in main database")
+                    return
 
                 # Insert into main releases table
                 cursor.execute(
-                    "INSERT INTO releases (releasename, section, unixtime, grp, reason, nukenet, nuked) VALUES (%s, %s, %s, %s, %s, %s, 1)",
-                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet),
+                    """INSERT INTO releases 
+                       (releasename, section, unixtime, grp, reason, nukenet, nuked) 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet, nuked_type),
                 )
+
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to insert into main database")
+                    return
 
                 # Delete from new_nukes
                 cursor.execute("DELETE FROM new_nukes WHERE id = %s", (nuke_id,))
+                
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to delete from pending nukes")
+                    return
+                    
                 conn.commit()
 
-                irc.reply(f"Moved {releasename} to main database with unixtime {new_unixtime}")
+                safe_section = section or "UNKNOWN"
+                irc.reply(f"Moved: {releasename} to main database | Section: {safe_section} | Unixtime: {new_unixtime}")
 
-        except Exception as e:
-            self.log.error(f"Error in movenuke: {e}")
-            irc.reply(f"Error moving nuke: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
+    # ==========
+    # Deletenuke
+    # ==========
+    @admin_only
     def deletenuke(self, irc, msg, args):
         """<id> - Delete a pending nuke"""
         
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
+        params, error = self._validate_delete_args(args, '1')
+        if error:
+            irc.reply(error)
             return
 
-        if not args:
-            irc.reply("Usage: +deletenuke <id>")
-            return
-
-        try:
-            nuke_id = int(args[0])
-        except ValueError:
-            irc.reply("ID must be an integer")
-            return
+        nuke_id = params['id']
 
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
+
+                # Verify the pending nuke exists and is correct type
+                cursor.execute("""
+                    SELECT nuked FROM new_nukes WHERE id = %s
+                """, (nuke_id,))
+                result = cursor.fetchone()
+
+                if not result:
+                    irc.reply(f"Error: Pending nuke ID {nuke_id} not found")
+                    return
+
+                nuked_type = result[0]
+                
+                # Verify correct type
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {nuke_id} is a {actual_type}, not a nuke. Use +delete{actual_type} instead.")
+                    return
+
+                # Delete from new_nukes
                 cursor.execute("DELETE FROM new_nukes WHERE id = %s", (nuke_id,))
                 conn.commit()
 
                 if cursor.rowcount > 0:
                     irc.reply(f"Deleted pending nuke ID: {nuke_id}")
                 else:
-                    irc.reply(f"Pending nuke ID: {nuke_id} not found")
+                    irc.reply(f"Error: Failed to delete pending nuke ID: {nuke_id}")
 
-        except Exception as e:
-            self.log.error(f"Error in deletenuke: {e}")
-            irc.reply(f"Error deleting nuke: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     deletenuke = commands.wrap(deletenuke, ['text'])
 
+    # ===========
+    # New unnukes
+    # ===========
     def newunnukes(self, irc, msg, args, unnuke_id=None):
         """[<release_id>] - List pending unnukes or show details of a specific one"""
         try:
@@ -3156,11 +3622,11 @@ class PreDBSQL(callbacks.Plugin):
                             return
 
                         unnuke_id_val, releasename, reason, nukenet, unixtime, section, grp, files, size = result
-                        time_ago = self.format_time_ago(unixtime)
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
                         
                         message = (
                             f"[ \x0303PENDING UNNUKE\x03 ] ID: {unnuke_id_val} | {releasename} | "
-                            f"Reason: {reason} | Network: {nukenet} | Time: {time_ago}"
+                            f"Reason: {reason} | Network: {nukenet} | Time: {unixtime}"  # CHANGED: {time_ago} to {unixtime}
                         )
                         irc.reply(message, private=True)
                     except ValueError:
@@ -3182,111 +3648,153 @@ class PreDBSQL(callbacks.Plugin):
                     irc.reply(f"Sending {len(results)} pending unnukes to {msg.nick}")
                     
                     for unnuke_id, releasename, reason, nukenet, unixtime in results:
-                        time_ago = self.format_time_ago(unixtime)
-                        #message = f"[ ID: {unnuke_id} ] [ {releasename} ] [ {reason} => {nukenet} ] [ {time_ago} ]"
-                        message = f"[ ID: {unnuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Time: {time_ago} ]"
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
+                        # REMOVED: message = f"[ ID: {unnuke_id} ] [ {releasename} ] [ {reason} => {nukenet} ] [ {time_ago} ]"
+                        message = f"[ ID: {unnuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Unixtime: {unixtime} ]"  # CHANGED: {time_ago} to {unixtime}
                         irc.reply(message, private=True)
 
-        except Exception as e:
-            self.log.error(f"Error in newunnukes: {e}")
-            irc.reply(f"Error retrieving pending unnukes: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     newunnukes = commands.wrap(newunnukes, [optional('text')])
 
-    # ===============================================================================
-    # Use this to convert timestamp to unix timestamp https://www.epochconverter.com/
-    # ================================================================================
+    # ============
+    # Move Unnukes
+    # ============
+    @admin_only
     def moveunnuke(self, irc, msg, args):
         """<id> <unixtime> [<section>] - Move a pending unnuke to main database with timestamp"""
         
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
+        params, error = self._validate_move_args(args, '2')
+        if error:
+            irc.reply(error)
             return
 
-        # Parse arguments from rest (args is a list)
-        parts = args if isinstance(args, list) else args.split()
-        
-        if len(parts) < 2:
-            irc.reply("Usage: +moveunnuke <id> <unixtime> [<section>]")
-            return
-
-        try:
-            unnuke_id = int(parts[0])
-            new_unixtime = int(parts[1])
-            section = ' '.join(parts[2:]) if len(parts) > 2 else None
-        except ValueError:
-            irc.reply("ID and unixtime must be integers")
-            return
+        unnuke_id = params['id']
+        new_unixtime = params['unixtime']
+        section = params['section']
 
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
 
-                # Fetch the pending unnuke
+                # Verify the pending unnuke exists and is correct type
                 cursor.execute("""
-                    SELECT releasename, reason, nukenet, grp
+                    SELECT releasename, reason, nukenet, grp, nuked
                     FROM new_nukes
                     WHERE id = %s
                 """, (unnuke_id,))
                 result = cursor.fetchone()
 
                 if not result:
-                    irc.reply(f"Pending unnuke ID {unnuke_id} not found")
+                    irc.reply(f"Error: Pending unnuke ID {unnuke_id} not found")
                     return
 
-                releasename, reason, nukenet, grp = result
+                releasename, reason, nukenet, grp, nuked_type = result
+                
+                # Verify correct type (should be '2' for unnuke)
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {unnuke_id} is a {actual_type}, not an unnuke. Use +move{actual_type} instead.")
+                    return
 
+                # Check if release already exists in main database
+                cursor.execute("SELECT releasename FROM releases WHERE releasename = %s", (releasename,))
+                if cursor.fetchone():
+                    irc.reply(f"Error: Release '{releasename}' already exists in main database")
+                    return
+
+                # Insert into main releases table (nuked=2 for unnuke)
                 cursor.execute(
-                    "INSERT INTO releases (releasename, section, unixtime, grp, reason, nukenet, nuked) VALUES (%s, %s, %s, %s %s, %s, 2)",
-                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet),
+                    """INSERT INTO releases 
+                       (releasename, section, unixtime, grp, reason, nukenet, nuked) 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet, nuked_type),
                 )
+
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to insert into main database")
+                    return
+
+                # Delete from new_nukes
+                cursor.execute("DELETE FROM new_nukes WHERE id = %s", (unnuke_id,))
+                
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to delete from pending unnukes")
+                    return
+                    
+                conn.commit()
+
+                safe_section = section or "UNKNOWN"
+                irc.reply(f"Moved: {releasename} to main database | Section: {safe_section} | Unixtime: {new_unixtime}")
+
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
+
+    # ===============
+    # Delete Unnukes
+    # ===============
+    def deleteunnuke(self, irc, msg, args):
+        """<id> - Delete a pending unnuke"""
+        
+        params, error = self._validate_delete_args(args, '2')
+        if error:
+            irc.reply(error)
+            return
+
+        unnuke_id = params['id']
+
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+
+                # Verify the pending unnuke exists and is correct type
+                cursor.execute("SELECT nuked FROM new_nukes WHERE id = %s", (unnuke_id,))
+                result = cursor.fetchone()
+
+                if not result:
+                    irc.reply(f"Error: Pending unnuke ID {unnuke_id} not found")
+                    return
+
+                nuked_type = result[0]
+                
+                # Verify correct type
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {unnuke_id} is a {actual_type}, not an unnuke. Use +delete{actual_type} instead.")
+                    return
 
                 # Delete from new_nukes
                 cursor.execute("DELETE FROM new_nukes WHERE id = %s", (unnuke_id,))
                 conn.commit()
 
-                irc.reply(f"Moved {releasename} to main database with unixtime {new_unixtime}")
-
-        except Exception as e:
-            self.log.error(f"Error in moveunnuke: {e}")
-            irc.reply(f"Error moving unnuke: {str(e)}")
-
-    def deleteunnuke(self, irc, msg, args):
-        """<id> - Delete a pending nuke"""
-        
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
-
-        if not args:
-            irc.reply("Usage: +deleteunnuke <id>")
-            return
-
-        try:
-            unnuke_id = int(args[0])
-        except ValueError:
-            irc.reply("ID must be an integer")
-            return
-
-        try:
-            with self.db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM new_nukes WHERE id = %s", (unnuke_id,))
-                conn.commit()
-
                 if cursor.rowcount > 0:
-                    irc.reply(f"Deleted pending nuke ID: {unnuke_id}")
+                    irc.reply(f"Deleted pending unnuke ID: {unnuke_id}")
                 else:
-                    irc.reply(f"Pending nuke ID: {unnuke_id} not found")
+                    irc.reply(f"Error: Failed to delete pending unnuke ID: {unnuke_id}")
 
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error in deleteunnuke: {e}")
+            irc.reply(f"Database error: {e.msg}")
         except Exception as e:
-            self.log.error(f"Error in deleteunnuke: {e}")
-            irc.reply(f"Error deleting nuke: {str(e)}")
+            self.log.error(f"Unexpected error in deleteunnuke: {e}")
+            irc.reply("An unexpected error occurred")
 
     deleteunnuke = commands.wrap(deleteunnuke, ['text'])
 
+# =============
+# New  Modnukes
+# =============
     def newmodnukes(self, irc, msg, args, modnuke_id=None):
         """[<release_id>] - List pending modnukes or show details of a specific one"""
         try:
@@ -3309,11 +3817,11 @@ class PreDBSQL(callbacks.Plugin):
                             return
 
                         modnuke_id_val, releasename, reason, nukenet, unixtime, section, grp, files, size = result
-                        time_ago = self.format_time_ago(unixtime)
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
                         
                         message = (
                             f"[ \x0305PENDING MODNUKE\x03 ] ID: {modnuke_id_val} | {releasename} | "
-                            f"Reason: {reason} | Network: {nukenet} | Time: {time_ago}"
+                            f"Reason: {reason} | Network: {nukenet} | Time: {unixtime}"  # CHANGED: {time_ago} to {unixtime}
                         )
                         irc.reply(message, private=True)
                     except ValueError:
@@ -3335,108 +3843,153 @@ class PreDBSQL(callbacks.Plugin):
                     irc.reply(f"Sending {len(results)} pending modnukes to {msg.nick}")
                     
                     for modnuke_id, releasename, reason, nukenet, unixtime in results:
-                        time_ago = self.format_time_ago(unixtime)
-                        #message = f"[ ID: {nuke_id} ] [ {releasename} ] [ {reason} => {nukenet} ] [ {time_ago} ]"
-                        message = f"[ ID: {modnuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Time: {time_ago} ]"
+                        # REMOVED: time_ago = self.format_time_ago(unixtime)
+                        # REMOVED: message = f"[ ID: {nuke_id} ] [ {releasename} ] [ {reason} => {nukenet} ] [ {time_ago} ]"
+                        message = f"[ ID: {modnuke_id} ] [ Release: {releasename} ] [ Reason: {reason} => Network: {nukenet} ] [ Unixtime: {unixtime} ]"  # CHANGED: {time_ago} to {unixtime}
                         irc.reply(message, private=True)
 
-        except Exception as e:
-            self.log.error(f"Error in newmodnukes: {e}")
-            irc.reply(f"Error retrieving pending modnukes: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     newmodnukes = commands.wrap(newmodnukes, [optional('text')])
 
-    # ===============================================================================
-    # Use this to convert timestamp to unix timestamp https://www.epochconverter.com/
-    # ================================================================================
+# ==============
+# Move  Modnukes
+# ==============
+    @admin_only
     def movemodnuke(self, irc, msg, args):
         """<id> <unixtime> [<section>] - Move a pending modnuke to main database with timestamp"""
         
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
+        params, error = self._validate_move_args(args, '3')
+        if error:
+            irc.reply(error)
             return
 
-        # Parse arguments from rest (args is a list)
-        parts = args if isinstance(args, list) else args.split()
-        
-        if len(parts) < 2:
-            irc.reply("Usage: +movemodnuke <id> <unixtime> [<section>]")
-            return
-
-        try:
-            modnuke_id = int(parts[0])
-            new_unixtime = int(parts[1])
-            section = ' '.join(parts[2:]) if len(parts) > 2 else None
-        except ValueError:
-            irc.reply("ID and unixtime must be integers")
-            return
+        modnuke_id = params['id']
+        new_unixtime = params['unixtime']
+        section = params['section']
 
         try:
             with self.db_connection() as conn:
                 cursor = conn.cursor()
 
-                # Fetch the pending modnuke
+                # Verify the pending modnuke exists and is correct type
                 cursor.execute("""
-                    SELECT releasename, reason, nukenet, grp
+                    SELECT releasename, reason, nukenet, grp, nuked
                     FROM new_nukes
                     WHERE id = %s
                 """, (modnuke_id,))
                 result = cursor.fetchone()
 
                 if not result:
-                    irc.reply(f"Pending modnuke ID: {modnuke_id} not found")
+                    irc.reply(f"Error: Pending modnuke ID {modnuke_id} not found")
                     return
 
-                releasename, reason, nukenet, grp = result
+                releasename, reason, nukenet, grp, nuked_type = result
+                
+                # Verify correct type
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {modnuke_id} is a {actual_type}, not a modnuke. Use +move{actual_type} instead.")
+                    return
 
+                # Check if release already exists in main database
+                cursor.execute("SELECT releasename FROM releases WHERE releasename = %s", (releasename,))
+                if cursor.fetchone():
+                    irc.reply(f"Error: Release '{releasename}' already exists in main database")
+                    return
+
+                # Insert into main releases table
                 cursor.execute(
-                    "INSERT INTO releases (releasename, section, unixtime, grp, reason, nukenet, nuked) VALUES (%s, %s, %s, %s, %s, %s, 3)",
-                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet),
+                    """INSERT INTO releases 
+                       (releasename, section, unixtime, grp, reason, nukenet, nuked) 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (releasename, section or "UNKNOWN", new_unixtime, grp, reason, nukenet, nuked_type),
                 )
+
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to insert into main database")
+                    return
+
+                # Delete from new_nukes
+                cursor.execute("DELETE FROM new_nukes WHERE id = %s", (modnuke_id,))
+                
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    irc.reply("Error: Failed to delete from pending modnukes")
+                    return
+                    
+                conn.commit()
+
+                safe_section = section or "UNKNOWN"
+                irc.reply(f"Moved: {releasename} to main database | Section: {safe_section} | Unixtime: {new_unixtime}")
+
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
+
+# =================
+# Delete  Modnukes
+# =================
+    def deletemodnukes(self, irc, msg, args):
+        """<id> - Delete a pending modnuke"""
+        
+        params, error = self._validate_delete_args(args, '3')
+        if error:
+            irc.reply(error)
+            return
+
+        modnuke_id = params['id']
+
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+
+                # Verify the pending modnuke exists and is correct type
+                cursor.execute("SELECT nuked FROM new_nukes WHERE id = %s", (modnuke_id,))
+                result = cursor.fetchone()
+
+                if not result:
+                    irc.reply(f"Error: Pending modnuke ID {modnuke_id} not found")
+                    return
+
+                nuked_type = result[0]
+                
+                # Verify correct type
+                if nuked_type != params['expected_type']:
+                    type_names = {'1': 'nuke', '2': 'unnuke', '3': 'modnuke', '4': 'delpre', '5': 'undelpre'}
+                    actual_type = type_names.get(nuked_type, 'unknown')
+                    irc.reply(f"Error: ID {modnuke_id} is a {actual_type}, not a modnuke. Use +delete{actual_type} instead.")
+                    return
 
                 # Delete from new_nukes
                 cursor.execute("DELETE FROM new_nukes WHERE id = %s", (modnuke_id,))
                 conn.commit()
 
-                irc.reply(f"Moved {releasename} to main database with unixtime {new_unixtime}")
-
-        except Exception as e:
-            self.log.error(f"Error in movemodnuke: {e}")
-            irc.reply(f"Error moving movemodnuke: {str(e)}")
-
-
-    def deletemodnukes(self, irc, msg, args, modnuke_id_int):
-        """<id> - Delete a pending modnuke"""
-        
-        # Security check
-        if msg.nick != 'klapvogn':
-            irc.reply("Error: You do not have permission to use this command.")
-            return
-
-        try:
-            modnuke_id_int = int(modnuke_id_int)
-        except ValueError:
-            irc.reply("ID must be an integer")
-            return
-
-        try:
-            with self.db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM new_nukes WHERE id = %s", (modnuke_id_int,))
-                conn.commit()
-
                 if cursor.rowcount > 0:
-                    irc.reply(f"Deleted pending modnuke ID: {modnuke_id_int}")
+                    irc.reply(f"Deleted pending modnuke ID: {modnuke_id}")
                 else:
-                    irc.reply(f"Pending modnuke ID: {modnuke_id_int} not found")
+                    irc.reply(f"Error: Failed to delete pending modnuke ID: {modnuke_id}")
 
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error in deletemodnukes: {e}")
+            irc.reply(f"Database error: {e.msg}")
         except Exception as e:
-            self.log.error(f"Error in modnukes: {e}")
-            irc.reply(f"Error deleting modnukes: {str(e)}")
+            self.log.error(f"Unexpected error in deletemodnukes: {e}")
+            irc.reply("An unexpected error occurred")
 
-    deletemodnukes = commands.wrap(deletemodnukes, ['text'])    
+    deletemodnukes = commands.wrap(deletemodnukes, ['text'])
 
+# =======
+# Pending
+# =======
     def pending(self, irc, msg, args):
         """Show counts of pending nukes, unnukes, and modnukes"""
         try:
@@ -3447,17 +4000,22 @@ class PreDBSQL(callbacks.Plugin):
                 cursor.execute("SELECT nuked, COUNT(*) FROM new_nukes GROUP BY nuked")
                 results = cursor.fetchall()
                 
-                # Initialize counts
-                counts = {1: 0, 2: 0, 3: 0}
+                # Initialize counts - using string keys to match ENUM values
+                counts = {'1': 0, '2': 0, '3': 0, '4': 0, '5': 0}
                 for nuked_type, count in results:
                     if nuked_type in counts:
                         counts[nuked_type] = count
+                    else:
+                        # Handle any unexpected values
+                        self.log.warning(f"Unexpected nuked value: {nuked_type}")
                 
-                irc.reply(f"\x0305Nukes\x03: {counts[1]} | \x0303Unnukes\x03: {counts[2]} | \x0305Modnukes\x03: {counts[3]}")
+                irc.reply(f"\x0305Nukes\x03: {counts['1']} | \x0303Unnukes\x03: {counts['2']} | \x0305Modnukes\x03: {counts['3']}")
 
-        except Exception as e:
-            self.log.error(f"Error in pending: {e}")
-            irc.reply(f"Error retrieving pending counts: {str(e)}")
+        except mysql.connector.Error as e:
+            self.log.error(f"Database error {e.errno}: {e.msg}")
+            irc.reply("Database error occurred")
+        except ValueError as e:
+            irc.reply(f"Invalid input: {e}")
 
     pending = commands.wrap(pending, [])
     
@@ -3465,22 +4023,500 @@ class PreDBSQL(callbacks.Plugin):
     # HELPER FUNCTIONS
     # ================
     def _get_target_irc_state(self):
-        """Cached IRC state lookup"""
+        """Cached IRC state lookup with connection validation"""
+        # Check if cached state is still valid and connected
         if self.target_irc_state and self.target_irc_state in world.ircs:
-            return self.target_irc_state
-            
+            # Verify the connection is actually active
+            if self._is_irc_connected(self.target_irc_state):
+                return self.target_irc_state
+            else:
+                # Cached state is disconnected, clear it and search again
+                self.log.debug("Cached IRC state is disconnected, searching for new connection")
+                self.target_irc_state = None
+        
+        # Search for active connection to target network
         for irc_state in world.ircs:
-            if "omg" in irc_state.network:
+            if "omg" in irc_state.network and self._is_irc_connected(irc_state):
                 self.target_irc_state = irc_state
+                self.log.info(f"Found active IRC connection to {irc_state.network}")
                 return irc_state
+        
+        self.log.warning("No active IRC connection found for target network 'omg'")
         return None
     
+    def _is_irc_connected(self, irc_state):
+        """Check if an IRC state object is actually connected"""
+        try:
+            # Check if driver exists and is connected
+            if hasattr(irc_state, 'driver') and irc_state.driver:
+                if hasattr(irc_state.driver, 'connected') and irc_state.driver.connected:
+                    return True
+            
+            # Alternative: check if zombie flag is False (disconnected clients are marked as zombies)
+            if hasattr(irc_state, 'zombie') and not irc_state.zombie:
+                return True
+            
+            # Fallback: if we have a driver object, assume connected
+            if hasattr(irc_state, 'driver') and irc_state.driver is not None:
+                return True
+                
+        except Exception as e:
+            self.log.error(f"Error checking IRC connection state: {e}")
+        
+        return False
+    
+    def _is_music_release(self, releasename):
+        """Check if a release is a music release by looking up its section"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT section FROM releases WHERE releasename = %s",
+                    (releasename,)
+                )
+                result = cursor.fetchone()
+                if result:
+                    section = result[0]
+                    return section in self.MUSIC_SECTIONS
+        except Exception as e:
+            self.log.error(f"Error checking if music release: {e}")
+        return False    
+    
+    def _parse_music_release(self, releasename):
+        """
+        Parse a music release name to extract artist and album.
+        
+        Examples:
+        - Wreckless-Unforced_Rhythms-(DISWRLP001BP)-16BIT-WEB-FLAC-2026-PTC
+        -> artist: Wreckless, album: Unforced Rhythms, year: 2026
+        - Artist_Name-Album_Title-WEB-FLAC-2024-GROUP
+        -> artist: Artist Name, album: Album Title, year: 2024
+        - VA-Compilation_Name-WEB-FLAC-2024-GROUP
+        -> artist: VA, album: Compilation Name, year: 2024
+        
+        Returns:
+            tuple: (artist, album, year) or (None, None, None) if parsing fails
+        """
+        try:
+            # Extract year from release name (4 digits)
+            year_match = re.search(r'-(\d{4})-[^-]+$', releasename)
+            year = year_match.group(1) if year_match else None
+            
+            # Split by first hyphen to separate artist from rest
+            parts = releasename.split('-', 1)
+            if len(parts) < 2:
+                return None, None, year
+            
+            artist = parts[0].replace('_', ' ').strip()
+            
+            # Extract album title (everything before format tags)
+            rest = parts[1]
+            
+            # Remove catalog numbers in parentheses like (DISWRLP001BP)
+            rest = re.sub(r'\([A-Z0-9]+\)', '', rest)
+            
+            # Find where the format/encoding info starts
+            # Common patterns: -WEB-, -CD-, -VINYL-, -16BIT-, -24BIT-, -FLAC-, -MP3-, etc.
+            format_patterns = [
+                r'-(WEB|CD|VINYL|RETAIL|16BIT|24BIT|FLAC|MP3|320|V0|V2|REMASTERED|DELUXE)',
+                r'-\d+BIT-',  # Catch 16BIT, 24BIT, etc.
+            ]
+            
+            album = rest
+            for pattern in format_patterns:
+                format_match = re.search(pattern, rest, re.IGNORECASE)
+                if format_match:
+                    album = rest[:format_match.start()]
+                    break
+            
+            # If still no match, try to find year and take everything before it
+            if album == rest and year_match:
+                album = rest[:year_match.start()].rstrip('-')
+            
+            # If still no luck, take everything except last 2 segments (usually GROUP and format)
+            if album == rest:
+                album_parts = rest.split('-')
+                if len(album_parts) > 2:
+                    album = '-'.join(album_parts[:-2])
+            
+            album = album.replace('_', ' ').strip().strip('-')
+            
+            # Clean up extra whitespace
+            artist = ' '.join(artist.split())
+            album = ' '.join(album.split())
+            
+            return artist, album, year
+            
+        except Exception as e:
+            self.log.error(f"Error parsing release name '{releasename}': {e}")
+            return None, None, None   
+
+    def _search_discogs(self, artist, album, year=None):
+        """
+        Search Discogs using authenticated API and return the URL of the best match.
+        
+        Args:
+            artist: Artist name
+            album: Album title
+            year: Release year (optional)
+        
+        Returns:
+            tuple: (url, title) or (None, None) if not found
+        """
+        try:
+            # Check if API token is available
+            if not self.discogs_token:
+                self.log.warning("Discogs API token not configured - skipping lookup")
+                return None, None
+            
+            # Construct search query
+            query_parts = []
+            if artist:
+                query_parts.append(artist)
+            if album:
+                query_parts.append(album)
+            if year:
+                query_parts.append(str(year))
+            
+            query = ' '.join(query_parts)
+            
+            if not query:
+                self.log.warning("Empty search query for Discogs")
+                return None, None
+            
+            # APPLY RATE LIMITING HERE
+            self.discogs_limiter.wait_if_needed()            
+            
+            self.log.info(f"Searching Discogs API for: {query}")
+            
+            # Discogs API endpoint
+            api_url = "https://api.discogs.com/database/search"
+            params = {
+                'q': query,
+                'type': 'release',  # Search only releases (not masters, artists, labels)
+                'per_page': 5,      # Get top 5 results
+                'page': 1,
+                'token': self.discogs_token  # Authentication token
+            }
+            
+            headers = {
+                'User-Agent': 'PreDBSQL/1.0',  # Required by Discogs
+                'Accept': 'application/json'
+            }
+            
+            response = self.session.get(api_url, params=params, headers=headers, timeout=15)
+            
+            # Handle rate limiting (fallback if limiter fails)
+            if response.status_code == 429:
+                self.log.warning("Discogs API rate limit hit (429) - backing off")
+                time.sleep(5)
+                return None, None
+           
+            if response.status_code == 401:
+                self.log.error("Discogs API authentication failed - check your token")
+                return None, None
+            
+            if response.status_code != 200:
+                self.log.warning(f"Discogs API returned status {response.status_code}")
+                return None, None
+            
+            data = response.json()
+            
+            # Check if we got results
+            results = data.get('results', [])
+            if not results:
+                self.log.info(f"No Discogs results found for: {query}")
+                return None, None
+            
+            # Get the first result
+            first_result = results[0]
+            
+            # Log all results for debugging
+            self.log.debug(f"Found {len(results)} Discogs results:")
+            for i, result in enumerate(results[:3]):
+                self.log.debug(f"  {i+1}. {result.get('title', 'N/A')} ({result.get('year', 'N/A')})")
+            
+            # Build the web URL from the result
+            # Discogs returns:
+            # - uri: "/release/36492040-Aaron-Schwarz-2-Parallel-Motion" (best option)
+            # - resource_url: "https://api.discogs.com/releases/36492040" (API endpoint)
+            
+            uri = first_result.get('uri')
+            if uri:
+                # This is the cleanest way - uri is the web path
+                full_url = f"https://www.discogs.com{uri}"
+            else:
+                # Fallback: construct from resource_url
+                resource_url = first_result.get('resource_url', '')
+                if '/releases/' in resource_url:
+                    release_id = resource_url.split('/releases/')[-1]
+                    # Try to construct a clean URL with slug
+                    title = first_result.get('title', '')
+                    if title:
+                        # Clean title for URL slug
+                        slug = title.replace(' - ', '-').replace(' ', '-')
+                        slug = ''.join(c for c in slug if c.isalnum() or c == '-')
+                        full_url = f"https://www.discogs.com/release/{release_id}-{slug}"
+                    else:
+                        full_url = f"https://www.discogs.com/release/{release_id}"
+                elif '/masters/' in resource_url:
+                    master_id = resource_url.split('/masters/')[-1]
+                    full_url = f"https://www.discogs.com/master/{master_id}"
+                else:
+                    self.log.warning(f"Could not parse Discogs resource URL: {resource_url}")
+                    return None, None
+            
+            # Extract title and other metadata
+            title = first_result.get('title', None)
+            result_year = first_result.get('year', None)
+            formats = first_result.get('format', [])
+            
+            self.log.info(f"Found Discogs release: {title} ({result_year})")
+            self.log.info(f"Discogs URL: {full_url}")
+            if formats:
+                self.log.debug(f"Format: {', '.join(formats)}")
+            
+            return full_url, title
+            
+        except requests.RequestException as e:
+            self.log.error(f"Network error searching Discogs API: {e}")
+            return None, None
+        except json.JSONDecodeError as e:
+            self.log.error(f"Error parsing Discogs API JSON response: {e}")
+            return None, None
+        except json.JSONDecodeError as e:
+            self.log.error(f"Unexpected error in Discogs API search: {e}", exc_info=True)
+            return None, None
+
+    def _update_release_url(self, releasename, url):
+        """
+        Update the URL field for a release in the database.
+        
+        Args:
+            releasename: Release name to update
+            url: Discogs URL to store
+        
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE releases SET url = %s WHERE releasename = %s",
+                    (url, releasename)
+                )
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    self.log.info(f"Updated URL for {releasename}: {url}")
+                    return True
+                else:
+                    self.log.warning(f"No rows updated for {releasename}")
+                    return False
+                    
+        except Exception as e:
+            self.log.error(f"Error updating release URL in database: {e}")
+            return False
+
+
+    def _process_discogs_lookup(self, releasename, announce_irc=None):
+        """
+        Process a complete Discogs lookup: parse, search, and update database.
+        
+        Args:
+            releasename: Full scene release name
+            announce_irc: IRC object for announcements (optional)
+        
+        Returns:
+            tuple: (url, message) - URL if successful (or None), and status message
+        """
+        # Parse the release name
+        artist, album, year = self._parse_music_release(releasename)
+        
+        if not artist or not album:
+            msg = f"Could not parse release name: {releasename}"
+            self.log.warning(msg)
+            return None, msg
+        
+        self.log.info(f"Parsed: Artist='{artist}', Album='{album}', Year='{year}'")
+        
+        # Search Discogs
+        url, title = self._search_discogs(artist, album, year)
+        
+        if not url:
+            msg = f"No Discogs results for: {artist} - {album}"
+            if year:
+                msg += f" ({year})"
+            return None, msg
+        
+        # Update database
+        success = self._update_release_url(releasename, url)
+        
+        if success:
+            msg = f"✓ {artist} - {album}"
+            if year:
+                msg += f" ({year})"
+            
+            # ANNOUNCE USING YOUR EXISTING METHOD
+            if announce_irc:
+                self.announce_url(announce_irc, releasename, url)
+            
+            return url, msg
+        else:
+            return None, "Failed to update database"
+
     def human_readable_number(self, n):
         """Convert large numbers into a human-readable format with commas (e.g., 12,345,678)."""
         if n is None:
             return "0"
         return f"{n:,}"
 
+    def _validate_move_args(self, args, expected_nuked_type):
+        """Validate arguments for move commands (movenuke, moveunnuke, movemodnuke)"""
+                
+        if not isinstance(args, list) or len(args) < 2:
+            return None, "Usage: +move<command> <id> <unixtime> [<section>]"
+        
+        # Validate ID
+        try:
+            record_id = int(args[0])
+            if record_id <= 0:
+                return None, "Error: ID must be a positive integer"
+        except ValueError:
+            return None, "Error: ID must be a valid integer"
+        
+        # Validate unixtime
+        try:
+            unixtime = int(args[1])
+            current = int(time.time())
+            if unixtime > current + 3600:
+                return None, "Error: Unixtime cannot be more than 1 hour in the future"
+            if unixtime < 946684800:  # Jan 1, 2000
+                return None, "Error: Unixtime is too old (before year 2000)"
+        except ValueError:
+            return None, "Error: Unixtime must be a valid integer"
+        
+        # Validate section
+        section = None
+        if len(args) > 2:
+            section = ' '.join(args[2:]).strip()
+            if not re.match(r'^[a-zA-Z0-9\s\-_]+$', section):
+                return None, "Error: Section contains invalid characters (allowed: letters, numbers, spaces, hyphens, underscores)"
+            section = section[:50].upper()
+        
+        return {
+            'id': record_id,
+            'unixtime': unixtime,
+            'section': section,
+            'expected_type': expected_nuked_type
+        }, None
+    
+    def _validate_delete_args(self, args, expected_nuked_type):
+        """Validate arguments for delete commands (deletenuke, deleteunnuke, deletemodnuke)"""
+        if not isinstance(args, list) or len(args) < 1:
+            return None, "Usage: +delete<command> <id>"
+        
+        # Validate ID
+        try:
+            record_id = int(args[0])
+            if record_id <= 0:
+                return None, "Error: ID must be a positive integer"
+        except ValueError:
+            return None, "Error: ID must be a valid integer"
+        
+        return {
+            'id': record_id,
+            'expected_type': expected_nuked_type
+        }, None
+
+    # ============================================
+    # UNIFIED NUKE HANDLERS (Replaces duplicates)
+    # ============================================
+    
+    def _handle_nuke_operation(self, irc, releasename, reason, nukenet, 
+                               nuke_type, check_value, name, pending_cmd):
+        """Unified handler for all nuke operations"""
+        try:
+            with self.db_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if release exists in main releases table
+                cursor.execute("SELECT nuked FROM releases WHERE releasename = %s", (releasename,))
+                result = cursor.fetchone()
+
+                if result:
+                    # Release exists - check if already in target state
+                    if result[0] == check_value:
+                        irc.reply(f"Release {releasename} is already {name}d.")
+                        return
+
+                    # Update the release
+                    cursor.execute(
+                        "UPDATE releases SET nuked = %s, reason = %s, nukenet = %s WHERE releasename = %s",
+                        (nuke_type, reason, nukenet, releasename),
+                    )
+                    conn.commit()
+
+                    if cursor.rowcount > 0:
+                        self.announce_nuke_status(irc, releasename, reason, nukenet, int(nuke_type))
+                else:
+                    # Release not found - add to new_nukes instead
+                    group = releasename.split('-')[-1] if '-' in releasename else None
+                    
+                    try:
+                        cursor.execute(
+                            "INSERT INTO new_nukes (releasename, reason, nukenet, grp, nuked) VALUES (%s, %s, %s, %s, %s)",
+                            (releasename, reason, nukenet, group, nuke_type),
+                        )
+                        conn.commit()
+                        irc.reply(f"Release {releasename} not in database - added to pending {name}s. Use +{pending_cmd} to review.")
+                    except mysql.connector.IntegrityError:
+                        irc.reply(f"Release {releasename} already in pending {name}s")
+                    except Exception as e:
+                        self.log.error(f"Error adding to new_nukes: {e}")
+                        irc.reply(f"Error adding to pending {name}s")
+
+        except Exception as e:
+            self.log.error(f"{name} error: {e}")
+            irc.reply(f"Error processing {name}: {str(e)}")
+
+    def _dispatch_nuke_thread(self, irc, operation, releasename, reason, nukenet):
+        """Dispatch to unified handler based on operation type"""
+        config = self.nuke_handlers.get(operation)
+        if not config:
+            self.log.error(f"Unknown nuke operation: {operation}")
+            return
+            
+        self._handle_nuke_operation(
+            irc, releasename, reason, nukenet,
+            nuke_type=config['type'],
+            check_value=config['check'],
+            name=config['name'],
+            pending_cmd=config['pending_cmd']
+        )
+
+    def die(self):
+        """Called when plugin is unloaded - cleanup resources"""
+        self.log.info("PreDBSQL plugin shutting down, cleaning up resources...")
+        
+        # Shutdown thread pool and wait for tasks to complete
+        if hasattr(self, 'thread_pool'):
+            self.log.debug("Shutting down thread pool...")
+            self.thread_pool.shutdown(wait=True, cancel_futures=False)
+            self.log.debug("Thread pool shutdown complete")
+        
+        # Close requests session
+        if hasattr(self, 'session'):
+            self.log.debug("Closing requests session...")
+            self.session.close()
+            self.log.debug("Requests session closed")
+        
+        # Note: pending_processor_thread is daemon=True so it will stop automatically
+        # Note: connection_pool connections will be closed when they're returned to pool
+        
+        self.log.info("PreDBSQL plugin cleanup complete")
+        
     def prehelp(self, irc, msg, args):
         """Sends help information about the Kudos plugin in a private message."""
         # Announce in channel if command was used publicly
