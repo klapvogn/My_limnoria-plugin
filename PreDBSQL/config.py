@@ -52,17 +52,17 @@ def configure(advanced):
 PreDBSQL = conf.registerPlugin("PreDBSQL")
 
 conf.registerGlobalValue(PreDBSQL, 'adminNick',
-    registry.String("USERNAME", _("""Admin nickname for restricted commands"""))
+    registry.String("klapvogn", _("""Admin nickname for restricted commands"""))
 )
 conf.registerGlobalValue(PreDBSQL, 'autoDiscogs',
     registry.Boolean(False, _("""Enable automatic Discogs URL lookup for new music releases."""))
 )    
 conf.registerChannelValue(PreDBSQL, 'PreannounceChannel',
-    registry.String("#CHANNEL1", _("""Channel for PRE announcements"""))
+    registry.String("#omgwtfnzbs.pre", _("""Channel for PRE announcements"""))
 )
     
 conf.registerChannelValue(PreDBSQL, 'InfoannounceChannel',
-    registry.String("#CHANNEL2", ("""Channel for info announcements"""))
+    registry.String("#omgwtfnzbs.info", ("""Channel for info announcements"""))
 )
 
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

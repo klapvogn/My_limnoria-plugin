@@ -14,7 +14,7 @@ import supybot.ircmsgs as ircmsgs
 import supybot.commands as commands
 import supybot.world as world
 import contextlib  # For better connection management
-from datetime import datetime, date
+from datetime import datetime, date, time as datetime_time
 from functools import lru_cache
 from supybot.commands import wrap, optional
 from concurrent.futures import ThreadPoolExecutor
@@ -180,6 +180,7 @@ class PreDBSQL(callbacks.Plugin):
         "BLURAY-FULL": "\00312BLURAY\003",
         "BLURAY-FULL-DE": "\00312BLURAY-FULL-DE\003",
         "BLURAY-FULL-SP": "\00312BLURAY-FULL-SP\003",
+        "BLURAY-FULL-FR": "\00312BLURAY-FULL-SP\003",
 # ANiME
         "ANiME": "\00306ANiME\003",
 # SPORT
@@ -304,12 +305,15 @@ class PreDBSQL(callbacks.Plugin):
         'collation': 'utf8mb4_unicode_ci'
     }
         # Create connection pool
-        self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-            pool_name="predb_pool",
-            pool_size=5,  # Adjust based on your needs
-            pool_reset_session=True,
-            **self.db_config
-        )
+        #self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+        #    pool_name="predb_pool",
+        #    pool_size=5,  # Adjust based on your needs
+        #    pool_reset_session=True,
+        #    **self.db_config
+        #)
+        self.connection_pool = None
+        self._pool_lock = threading.Lock()
+        self._pool_retry_after = 0         
 
         self.nuke_handlers = {
             'nuke': {'type': '1', 'check': '1', 'name': 'nuke', 'pending_cmd': 'newnukes'},
@@ -828,9 +832,31 @@ class PreDBSQL(callbacks.Plugin):
 
     @contextlib.contextmanager
     def db_connection(self):
-        """Get connection from pool"""
+        """Get connection from pool, creating pool lazily if needed"""
         conn = None
         try:
+            # Lazy pool creation with retry backoff
+            if self.connection_pool is None:
+                with self._pool_lock:
+                    if self.connection_pool is None:  # double-checked locking
+                        now = time.time()
+                        if now < self._pool_retry_after:
+                            raise mysql.connector.Error(
+                                f"MySQL unavailable, retrying after {int(self._pool_retry_after - now)}s"
+                            )
+                        try:
+                            self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+                                pool_name="predb_pool",
+                                pool_size=5,
+                                pool_reset_session=True,
+                                **self.db_config
+                            )
+                            self.log.info("MySQL connection pool created successfully")
+                        except mysql.connector.Error as e:
+                            self._pool_retry_after = time.time() + 30  # retry in 30s
+                            self.log.error(f"Failed to create MySQL pool: {e} — retrying in 30s")
+                            raise
+
             conn = self.connection_pool.get_connection()
             yield conn
         except mysql.connector.Error as e:
@@ -840,7 +866,7 @@ class PreDBSQL(callbacks.Plugin):
             raise
         finally:
             if conn and conn.is_connected():
-                conn.close()  # Returns connection to pool
+                conn.close()
                 self.log.debug("Database connection closed")
 
     # ========================
@@ -3375,7 +3401,7 @@ class PreDBSQL(callbacks.Plugin):
                 return result
                 
         except Exception as e:
-            print(f"Database stats error: {e}")
+            self.log.error(f"Database stats error: {e}")
             return None
 
     def db(self, irc, msg, args):
