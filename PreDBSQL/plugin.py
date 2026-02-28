@@ -341,11 +341,17 @@ class PreDBSQL(callbacks.Plugin):
             'failed': 0
         }                    
 
-        # Create thread pool with better error handling
+        # Main thread pool for IRC command handling
         self.thread_pool = ThreadPoolExecutor(
-            max_workers=3,  # Reduced from 5 to prevent resource exhaustion
+            max_workers=3,
             thread_name_prefix='predb_worker'
-        )
+        )        
+        # Separate pool ONLY for external HTTP link lookups (NFO/SFV/SRR)
+        # Must be separate to avoid deadlock when called from within thread_pool workers
+        self.link_pool = ThreadPoolExecutor(
+            max_workers=6,
+            thread_name_prefix='predb_links'
+        )        
 
         # Track active tasks
         self._active_tasks = 0
@@ -896,39 +902,24 @@ class PreDBSQL(callbacks.Plugin):
         except Exception:
             return None
 
-    def get_nfo_from_srrdb(self, releasename):
-        """Cached NFO lookup with timeout"""
+    def get_nfo_sfv_from_srrdb(self, releasename):
+        """Single API call returning both NFO and SFV links"""
         url = f"https://api.srrdb.com/v1/nfo/{releasename}"
         content = self.get_cached_content(url)
         
         if content:
             try:
-                # Use json.loads instead of eval for safety and proper JSON parsing
                 data = json.loads(content)
                 if data.get('nfolink'):
                     nfo_url = data['nfolink'][0]
-                    shortened = self.shorten_url(nfo_url)
-                    return f"[ \x033NFO\x03: {shortened} ] "
-            except (json.JSONDecodeError, KeyError, IndexError):
-                # Handle JSON parsing errors or missing keys
-                pass
-        return f"[ \x0305NFO\x03 ]"
-    
-    def get_sfv_from_srrdb(self, releasename):
-        """Cached SFV lookup with timeout"""
-        url = f"https://api.srrdb.com/v1/nfo/{releasename}"
-        content = self.get_cached_content(url)
-        
-        if content:
-            try:
-                data = json.loads(content)
-                if data.get('nfolink'):
-                    sfv_url = data['nfolink'][0].replace('.nfo', '.sfv')
-                    shortened = self.shorten_url(sfv_url)
-                    return f"[ \x033SFV\x03: {shortened} ] "
+                    sfv_url = nfo_url.replace('.nfo', '.sfv')
+                    return (
+                        f"[ \x033NFO\x03: {self.shorten_url(nfo_url)} ] ",
+                        f"[ \x033SFV\x03: {self.shorten_url(sfv_url)} ] "
+                    )
             except (json.JSONDecodeError, KeyError, IndexError):
                 pass
-        return f"[ \x0305SFV\x03 ]"
+        return "[ \x0305NFO\x03 ]", "[ \x0305SFV\x03 ]"
 
     def get_srr_from_srrdb(self, releasename):
         """Cached SRR lookup with timeout - checks if SRR download exists"""
@@ -967,16 +958,10 @@ class PreDBSQL(callbacks.Plugin):
             return f"[ \x0305SRR\x03 ]"
         
     def get_all_links(self, releasename):
-        """Get all links in parallel using cached functions"""
-        with ThreadPoolExecutor() as executor:
-            nfo_future = executor.submit(self.get_nfo_from_srrdb, releasename)
-            sfv_future = executor.submit(self.get_sfv_from_srrdb, releasename)
-            srr_future = executor.submit(self.get_srr_from_srrdb, releasename)
-            return (
-                nfo_future.result(), 
-                sfv_future.result(), 
-                srr_future.result()
-            )
+        """Get NFO, SFV, and SRR synchronously - called from within a thread pool worker"""
+        nfo_text, sfv_text = self.get_nfo_sfv_from_srrdb(releasename)
+        srr_text = self.get_srr_from_srrdb(releasename)
+        return nfo_text, sfv_text, srr_text
 
     # ========================
     # URL SHORTENING
@@ -1393,8 +1378,11 @@ class PreDBSQL(callbacks.Plugin):
             else:
                 url_text = f"[ \x0305URL\x03 ]"
             
-            # Get links in parallel
-            nfo_text, sfv_text, srr_text = self.get_all_links(releasename)
+            # With parallel execution using link_pool:
+            nfo_sfv_future = self.link_pool.submit(self.get_nfo_sfv_from_srrdb, releasename)
+            srr_future = self.link_pool.submit(self.get_srr_from_srrdb, releasename)
+            nfo_text, sfv_text = nfo_sfv_future.result()
+            srr_text = srr_future.result()
             # Info and section        
             info_string = f"[ \x033INFO\x03: {size} MB, {files} Files ] " if size and files else ""
             section_and_genre = f"[ {section_formatted} / {genre} ]" if genre and genre.lower() != 'null' else f"[ {section_formatted} ]"
@@ -1467,12 +1455,14 @@ class PreDBSQL(callbacks.Plugin):
         sea1 = release.replace("%", "*").strip()
         sea1 = sea1.lower()  # Normalize to lowercase for case-insensitive matching
 
+        # Strip any leading wildcards to protect index usage
+        sea1 = sea1.lstrip('*%')
+        if not sea1:
+            irc.reply("Search term too vague, please be more specific.")
+            return
         try:
-            # Use the connection via the context manager
             with self.db_connection() as conn:
                 cursor = conn.cursor()
-
-                # Execute the query for duplicates based on the release name
                 cursor.execute("""
                     SELECT releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet
                     FROM releases
@@ -1482,59 +1472,55 @@ class PreDBSQL(callbacks.Plugin):
                 """, (f"{sea1}%",))
                 results = cursor.fetchall()
 
-            # If no results are found
             if not results:
                 irc.reply(f"[ \x0305Nothing found, that makes me a sad pre bot :-(\x03 ]")
                 return
 
-            # Notify the user about sending results
             irc.reply(f"PM'ing last 10 results to {msg.nick}")
 
-            # List to accumulate all messages
-            messages = []
-            current_time = int(time.time())  # Define current_time before the loop
+            # Use link_pool directly here to avoid nested thread_pool deadlock
+            link_futures = {
+                result[0]: self.link_pool.submit(self.get_all_links, result[0])
+                for result in results
+            }
 
-            # Loop over all the results and build messages
+            nuke_status = {
+                '1': ("\x0304Nuked\x03", "\x0304"),
+                '2': ("\x0303UnNuked\x03", "\x0303"),
+                '3': ("\x0305ModNuked\x03", "\x0305"),
+                '4': ("\x0305DelPred\x03", "\x0305"),
+                '5': ("\x0303UnDelPred\x03", "\x0303")
+            }
+
+            messages = []
             for result in results:
-                # Unpack the result, skipping the first column (id)
                 releasename, section, unixtime, files, size, grp, genre, nuked, reason, nukenet = result
 
-                # Lookup the section color
-                section_formatted = self.section_colors.get(section, section)  # Default to section name if not found 
-
-                # Convert unixtime to a readable format
-                time_ago = self.format_time_ago(unixtime)
+                section_formatted = self.section_colors.get(section, section)
+                time_ago_str, time_color = self.format_time_ago(unixtime)
                 pretime_formatted = datetime.utcfromtimestamp(unixtime).strftime("%Y-%m-%d %H:%M:%S GMT")
 
-                # Get links in parallel
-                nfo_text, sfv_text, srr_text = self.get_all_links(releasename)
-                # Info and section        
+                time_ago = f"{time_color}{time_ago_str}\x03"
+                pretime_colored = f"{time_color}{pretime_formatted}\x03"
+
+                nfo_text, sfv_text, srr_text = link_futures[releasename].result()
+
                 info_string = f"[ \x033INFO\x03: {size} MB, {files} Files ] " if size and files else ""
                 section_and_genre = f"[ {section_formatted} / {genre} ]" if genre and genre.lower() != 'null' else f"[ {section_formatted} ]"
 
-                # Nuke status mapping
-                nuke_status = {
-                    '1': ("\x0304Nuked\x03", "\x0304"),
-                    '2': ("\x0303UnNuked\x03", "\x0303"),
-                    '3': ("\x0305ModNuked\x03", "\x0305"),
-                    '4': ("\x0305DelPred\x03", "\x0305"),
-                    '5': ("\x0303UnDelPred\x03", "\x0303")
-                }
                 status, color = nuke_status.get(nuked, ("", ""))
                 nuked_details = f"[ {status}: {color}{reason or 'No reason'}\x03 => {color}{nukenet or 'Unknown'}\x03 ]" if status else ""
 
-                # Get links in parallel
-                #nfo_text, sfv_text, srr_text = self.get_all_links(releasename)
-
-                # Build the message to send for each result
-                message = f"\x033[ PRED ]\x03 [ {releasename} ] [ \x033TIME\x03: {time_ago} / {pretime_formatted} ] in {section_and_genre} {info_string}{nuked_details}{nfo_text}{sfv_text}{srr_text}"
-
-                # Add the message to the list of messages
+                message = (
+                    f"\x033[ PRED ]\x03 [ {releasename} ] "
+                    f"[ \x033TIME\x03: {time_ago} / {pretime_colored} ] "
+                    f"in {section_and_genre} {info_string}{nuked_details}"
+                    f"{nfo_text}{sfv_text}{srr_text}"
+                )
                 messages.append(message)
 
-            # Send all messages to the user
-            for msg in messages:
-                irc.reply(msg, private=True)
+            for message in messages:
+                irc.reply(message, private=True)
 
         except mysql.connector.Error as e:
             self.log.error(f"Database error {e.errno}: {e.msg}")
@@ -3312,21 +3298,21 @@ class PreDBSQL(callbacks.Plugin):
         text = msg.args[1]
         channel = msg.args[0]
         
-        # Logging
-        #self.log.info(f"DEBUG: Received message in {channel}: {text}")
-        
         # Store for command handlers
         self.irc = irc
         self.msg = msg
-              
+            
         # Process commands in any channel
         if any(text.startswith(cmd) for cmd in self.command_handlers):
             self._process_command(text)
         else:
             self.log.debug("Message doesn't match any patterns, skipping")
 
-        # Clean expired release cache entries
-        self._clean_expired_cache_entries()
+        # Throttle cache cleanup to every 5 minutes instead of every message
+        now = time.time()
+        if now - self._last_memory_check > 300:
+            self._clean_expired_cache_entries()
+            self._last_memory_check = now
 
     def _clean_expired_cache_entries(self):
         """Clean expired entries from release cache"""
@@ -3359,7 +3345,6 @@ class PreDBSQL(callbacks.Plugin):
     # ===================
     # DATABASE STATISTICS
     # ===================
-    @lru_cache(maxsize=1)
     def _get_db_stats_cached(self, cache_key):
         """Cached database statistics with optimized caching"""
         # Return cached result if same cache key
@@ -4526,20 +4511,14 @@ class PreDBSQL(callbacks.Plugin):
         """Called when plugin is unloaded - cleanup resources"""
         self.log.info("PreDBSQL plugin shutting down, cleaning up resources...")
         
-        # Shutdown thread pool and wait for tasks to complete
         if hasattr(self, 'thread_pool'):
-            self.log.debug("Shutting down thread pool...")
             self.thread_pool.shutdown(wait=True, cancel_futures=False)
-            self.log.debug("Thread pool shutdown complete")
         
-        # Close requests session
+        if hasattr(self, 'link_pool'):
+            self.link_pool.shutdown(wait=True, cancel_futures=False)
+        
         if hasattr(self, 'session'):
-            self.log.debug("Closing requests session...")
             self.session.close()
-            self.log.debug("Requests session closed")
-        
-        # Note: pending_processor_thread is daemon=True so it will stop automatically
-        # Note: connection_pool connections will be closed when they're returned to pool
         
         self.log.info("PreDBSQL plugin cleanup complete")
         
